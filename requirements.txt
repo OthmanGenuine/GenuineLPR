@@ -1,0 +1,15 @@
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+flasgger==0.9.7.1
+mysql-connector-python==8.2.0
+pydantic==2.5.2
+passlib==1.7.4
+python-jose==3.3.0
+requests==2.31.0
+numpy==1.26.2
+opencv-python==4.8.1.78
+flask-swagger-ui=4.11.1
+ultralytics==8.0.226
+torch==2.1.1
+torchaudio==2.1.1
+torchvision==0.16.1
