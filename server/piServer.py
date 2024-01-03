@@ -3,7 +3,7 @@ from flask_swagger_ui import get_swaggerui_blueprint
 import mysql
 import time
 from mysql.connector.cursor_cext import CMySQLCursor
-from pydantic import BaseModel, ValidationError,EmailStr, Field
+from pydantic import BaseModel, ValidationError,EmailStr, Field,confloat
 from passlib.hash import pbkdf2_sha256
 from datetime import datetime
 from jose import JWTError, jwt
@@ -17,6 +17,7 @@ from ultralytics import YOLO
 from support_methods import license_formatting_ar,license_formatting_en,carAndPositionDetect,colorDetect
 import cv2
 import numpy as np
+
 app = Flask(__name__)
 socketio = SocketIO(app)
 
@@ -41,12 +42,11 @@ app.register_blueprint(swaggerui_blueprint)
 while True:
     try:
         conn = mysql.connector.connect(
-                    host='localhost',
-                    database='testDB',
-                    user='root',
-                    password='Uu12345-'
-                )
-
+            host='localhost',
+            database='testDB',
+            user='root',
+            password='Uu12345-'
+        )
         cursor = conn.cursor(cursor_class=CMySQLCursor, buffered=True)
 
 
@@ -73,7 +73,10 @@ while True:
                 orientation VARCHAR(50),
                 photo_data MEDIUMBLOB,
                 request_datetime DATETIME,
-                FOREIGN KEY (userid) REFERENCES User(userid)
+                camera_name VARCHAR(255),
+                FOREIGN KEY (userid) REFERENCES User(userid),
+                FOREIGN KEY (camera_id) REFERENCES Camera(camera_id)
+                
             )
             """,
             """
@@ -84,6 +87,7 @@ while True:
                 userid INT,
                 camera_name VARCHAR(255),
                 camera_mode VARCHAR(50), 
+                confidence_threshold FLOAT,
                 FOREIGN KEY (userid) REFERENCES User(userid)
             )
             """,
@@ -99,7 +103,7 @@ while True:
         print("Error:", error)
         time.sleep(2)
 
-#this is for the validation schema for the user
+#this is for the validation shcema for the user
 
 class LoginData(BaseModel):
     username: str
@@ -130,6 +134,8 @@ class CameraData(BaseModel):
     camera_name: str
     camera_mode: str
     camera_ip: str
+    confidence_threshold: confloat(strict=True, lt=1.0)
+
 #this is for the token 
 SECRET_KEY = "245"
 ALGORITHM = "HS256"
@@ -227,8 +233,8 @@ def add_camera():
     except ValidationError as e:
         return jsonify({"message": "Validation error", "error": str(e)})
 
-    query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, userid) VALUES (%s, %s, %s, %s)"
-    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, userid)
+    query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip,confidence_threshold ,userid) VALUES (%s, %s, %s, %s,%s)"
+    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip,camera_data.confidence_threshold ,userid)
 
     try:
         cursor.execute(query, values)
@@ -277,8 +283,8 @@ def update_camera():
     if not camera:
         return jsonify({"message": "Camera not found or does not belong to the user"})
 
-    query = "UPDATE Camera SET camera_name = %s, camera_mode = %s, camera_ip = %s WHERE camera_id = %s"
-    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.camera_id)
+    query = "UPDATE Camera SET camera_name = %s, camera_mode = %s,confidence_threshold=%s, camera_ip = %s WHERE camera_id = %s"
+    values = (camera_data.camera_name, camera_data.camera_mode,camera_data.confidence_threshold ,camera_data.camera_ip, camera_data.camera_id)
 
     try:
         cursor.execute(query, values)
@@ -444,12 +450,26 @@ def background_thread():
                                 'confidence':       conf_sum,
                                 'orientation' : direction,
                                 'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                'photo_data': jpg_as_text
+                                'photo_data': jpg_as_text,
+                                'userid' : userid,
+                                'camera_name': camera_name,
+                                'camera_id' : camera_id
                             }
-                            print(license_dict)
-                            socketio.emit('license', license_dict)
+                            license_dictWS={
+                                'vehicle_type':     vehicle_id,
+                                'license_type':     license_id,
+                                'plate_in_arabic':  arabic_translated_plate,                                                                                                                                    
+                                'plate_in_english': english_processed_plate,
+                                'confidence':       conf_sum,
+                                'orientation' : direction,
+                                'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'userid' : userid,
+                                'camera_name': camera_name,
+                                'camera_id' : camera_id
+                            }
+                            socketio.emit('license', license_dictWS)
                             vehicle_query(license_dict)
-                            time.sleep(1)
+                            time.sleep(7)
                         else:
                             continue
         cap.release()
@@ -458,41 +478,84 @@ def background_thread():
         
 def vehicle_query(license_dict):
     sql = """
-    INSERT INTO Request (
-        vehicle_type,
-        license_type,
-        plate_arabic,
-        plate_english,
-        confidence,
-        orientation,
-        request_datetime,
-        photo_data
-    ) VALUES (%s, %s, %s, %s, %s,%s,%s,%s)
-    """
+        INSERT INTO Request (
+            userid,
+            camera_id,
+            camera_name,
+            vehicle_type,
+            license_type,
+            plate_arabic,
+            plate_english,
+            confidence,
+            orientation,
+            photo_data,
+            request_datetime
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s)
+        """
 
     cursor.execute(sql, (
-        license_dict['vehicle_type'],
-        license_dict['license_type'],
-        license_dict['plate_in_arabic'],
-        license_dict['plate_in_english'],
-        license_dict['confidence'],
-        license_dict['orientation'],
-        license_dict['request_datetime'],
-        license_dict['photo_data'],
-    ))
+            license_dict['userid'],
+            license_dict['camera_id'],
+            license_dict['camera_name'],
+            license_dict['vehicle_type'],
+            license_dict['license_type'],
+            license_dict['plate_in_arabic'],
+            license_dict['plate_in_english'],
+            license_dict['confidence'],
+            license_dict['orientation'],
+            license_dict['photo_data'],
+            license_dict['request_datetime'],
+        ))
+
+        # Increment the request_count in the User table
+    sql_update = """
+        UPDATE User
+        SET request_count = request_count + 1
+        WHERE userid = %s
+        """
+    cursor.execute(sql_update, (userid,))
 
     conn.commit()
 
 
-
+global camera_name, userid, camera_id
 #this is for the socketio connection
 @socketio.on('connect')
 def handle_connect():
-    global connected
-    print('Client connected')
-    connected = True
-    thread = threading.Thread(target=background_thread)
-    thread.start()
+    global connected, userid, camera_id, camera_name
+    token = request.headers.get('X-My-Auth')
+    camera_id = request.headers.get('X-Camera-Id')  # Get the camera id from the header
+    if token is not None and camera_id is not None:
+        decoded_jwt = decode_access_token(token=token)
+        if "message" in decoded_jwt:
+            return jsonify(decoded_jwt)
+        username = decoded_jwt["username"]
+        query_check = "SELECT userid FROM User WHERE username = %s"
+        cursor.execute(query_check, (username,))
+        user = cursor.fetchone()
+        cursor.fetchall()
+   
+        if not user:
+            return jsonify({"message": "User does not exist"})
+        
+        # Get the camera name
+        query_camera_name = "SELECT camera_name FROM Camera WHERE camera_id = %s"
+        cursor.execute(query_camera_name, (camera_id,))
+        camera = cursor.fetchone()
+        cursor.fetchall()
+
+        if not camera:
+            return jsonify({"message": "Camera does not exist"})
+        
+        camera_name = camera[0]  # Store the camera name
+
+        print('Client connected, Camera ID:', camera_id, 'Camera Name:', camera_name)  # Print the camera id and name
+        connected = True
+        userid = user[0]  # Store the user id
+        thread = threading.Thread(target=background_thread)
+        thread.start()
+    else:
+        print('No token or camera id provided')
 #this is for the socketio disconnection
 @socketio.on('disconnect')
 def handle_disconnect():
