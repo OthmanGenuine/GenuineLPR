@@ -10,7 +10,7 @@ from jose import JWTError, jwt
 import secrets
 from typing import Optional
 import json
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit,disconnect
 import threading
 import base64
 from ultralytics import YOLO
@@ -43,9 +43,9 @@ while True:
     try:
         conn = mysql.connector.connect(
             host='localhost',
-            database='testDB',
+            database='project',
             user='root',
-            password='Uu12345-'
+            password='2459'
         )
         cursor = conn.cursor(cursor_class=CMySQLCursor, buffered=True)
 
@@ -203,10 +203,12 @@ def login_user():
     else:
         return jsonify({"message": "Incorrect password"})
 
-
+global camera_ip
 # this endpoint for the user camera add
 @app.route('/user/camera/add', methods=['POST'])
 def add_camera():
+    global camera_id,camera_ip  
+
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
         return jsonify({"message": "Authorization header is missing"})
@@ -218,14 +220,13 @@ def add_camera():
 
     username = decoded_jwt["username"]
 
-  
     query_check = "SELECT userid FROM User WHERE username = %s"
     cursor.execute(query_check, (username,))
     user = cursor.fetchone()
     cursor.fetchall()
     if not user:
         return jsonify({"message": "User does not exist"})
-    
+
     userid = user[0]
 
     try:
@@ -233,15 +234,14 @@ def add_camera():
     except ValidationError as e:
         return jsonify({"message": "Validation error", "error": str(e)})
 
-    query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip,confidence_threshold ,userid) VALUES (%s, %s, %s, %s,%s)"
-    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip,camera_data.confidence_threshold ,userid)
-
+    query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, confidence_threshold, userid) VALUES (%s, %s, %s, %s, %s)"
+    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.confidence_threshold, userid)
+    camera_ip = camera_data.camera_ip
     try:
         cursor.execute(query, values)
         conn.commit()
 
-       
-        camera_id = cursor.lastrowid
+        camera_id = cursor.lastrowid  # Update the global variable with the last inserted camera_id
 
         return jsonify({"message": "Camera added successfully", "camera_id": camera_id})
     except mysql.connector.Error as error:
@@ -250,6 +250,8 @@ def add_camera():
 #this endpoint for the user camera update
 @app.route('/user/camera/update', methods=['PUT'])
 def update_camera():
+    global connected_cameras
+
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
         return jsonify({"message": "Authorization header is missing"})
@@ -261,11 +263,9 @@ def update_camera():
 
     username = decoded_jwt["username"]
 
-   
     query_check = "SELECT userid FROM User WHERE username = %s"
     cursor.execute(query_check, (username,))
     user = cursor.fetchone()
-    cursor.fetchall()
     if not user:
         return jsonify({"message": "User does not exist"})
     
@@ -276,19 +276,27 @@ def update_camera():
     except ValidationError as e:
         return jsonify({"message": "Validation error", "error": str(e)})
 
-  
     query_check = "SELECT * FROM Camera WHERE camera_id = %s AND userid = %s"
     cursor.execute(query_check, (camera_data.camera_id, userid))
     camera = cursor.fetchone()
     if not camera:
         return jsonify({"message": "Camera not found or does not belong to the user"})
 
-    query = "UPDATE Camera SET camera_name = %s, camera_mode = %s,confidence_threshold=%s, camera_ip = %s WHERE camera_id = %s"
-    values = (camera_data.camera_name, camera_data.camera_mode,camera_data.confidence_threshold ,camera_data.camera_ip, camera_data.camera_id)
+    camera_id_to_update = camera_data.camera_id
+
+    query = "UPDATE Camera SET camera_name = %s, camera_mode = %s, confidence_threshold = %s, camera_ip = %s WHERE camera_id = %s"
+    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.confidence_threshold, camera_data.camera_ip, camera_id_to_update)
 
     try:
         cursor.execute(query, values)
         conn.commit()
+
+        for socket_id, cam_id in connected_cameras.items():
+            if cam_id == camera_id_to_update:
+                print('Disconnecting Socket ID:', socket_id)
+                socketio.server.disconnect(socket_id)
+                break
+
         return jsonify({"message": "Camera updated successfully"})
     except mysql.connector.Error as error:
         conn.rollback()
@@ -297,51 +305,49 @@ def update_camera():
 #this endpoint for the user camera delete
 @app.route('/user/camera/delete', methods=['DELETE'])
 def delete_camera():
-    auth_header = request.headers.get('Authorization', None)
+    auth_header = request.headers.get('Authorization')
     if not auth_header:
-        return jsonify({"message": "Authorization header is missing"})
+        return jsonify({"message": "Authorization header is missing"}), 401
 
     token = auth_header.split(" ")[1]
     decoded_jwt = decode_access_token(token=token)
     if "message" in decoded_jwt:
-        return jsonify(decoded_jwt)
+        return jsonify(decoded_jwt), 401
 
     username = decoded_jwt["username"]
 
     query_check = "SELECT userid FROM User WHERE username = %s"
     cursor.execute(query_check, (username,))
     user = cursor.fetchone()
-    cursor.fetchall()
     if not user:
-        return jsonify({"message": "User does not exist"})
+        return jsonify({"message": "User does not exist"}), 404
     
     userid = user[0]
 
-    
     data = request.json
     camera_id_to_delete = data.get('camera_id')
 
     if not camera_id_to_delete:
-        return jsonify({"message": "Missing camera_id in the request"})
+        return jsonify({"message": "Missing camera_id in the request"}), 400
 
     try:
-        
-        query_check = "SELECT * FROM Camera WHERE camera_id = %s AND userid = %s"
-        cursor.execute(query_check, (camera_id_to_delete, userid))
-        camera = cursor.fetchone()
+        # Disable foreign key checks
+        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
 
-        if not camera:
-            return jsonify({"message": "Camera not found or does not belong to the user"})
-
-        
+        # Now, delete the camera
         delete_query = "DELETE FROM Camera WHERE camera_id = %s"
         cursor.execute(delete_query, (camera_id_to_delete,))
         conn.commit()
-        return jsonify({"message": "Camera deleted successfully"})
+
+        # Re-enable foreign key checks
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+
+        return jsonify({"message": "Camera deleted successfully"}), 200
+
     except mysql.connector.Error as error:
         conn.rollback()
-        return jsonify({"message": "Failed to delete camera", "error": str(error)})
-    
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+        return jsonify({"message": "Failed to delete camera", "error": str(error)}), 500
 
 connected = False
 #this is for the socketio(Background thread)
@@ -519,12 +525,17 @@ def vehicle_query(license_dict):
 
 
 global camera_name, userid, camera_id
+connected_cameras = {}
 #this is for the socketio connection
 @socketio.on('connect')
 def handle_connect():
-    global connected, userid, camera_id, camera_name
+ 
+    global connected, userid, camera_id, camera_name,connected_cameras
     token = request.headers.get('X-My-Auth')
     camera_id = request.headers.get('X-Camera-Id')  # Get the camera id from the header
+
+    if camera_id:
+        connected_cameras[request.sid] = camera_id
     if token is not None and camera_id is not None:
         decoded_jwt = decode_access_token(token=token)
         if "message" in decoded_jwt:
@@ -556,12 +567,23 @@ def handle_connect():
         thread.start()
     else:
         print('No token or camera id provided')
-#this is for the socketio disconnection
+
 @socketio.on('disconnect')
 def handle_disconnect():
-    global connected
+    global connected, connected_cameras,camera_ip
     print('Client disconnected')
     connected = False
+
+    # Remove the disconnected client from connected_cameras
+    for socket_id, cam_id in list(connected_cameras.items()):  # Use list to avoid RuntimeError
+        if request.sid == socket_id:
+            del connected_cameras[socket_id]
+            print('Removed Socket ID:', socket_id, 'from connected cameras')
+            break
+
+
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)
