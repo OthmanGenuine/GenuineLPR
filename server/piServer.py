@@ -43,9 +43,9 @@ while True:
     try:
         conn = mysql.connector.connect(
             host='localhost',
-            database='project',
+            database='testDB',
             user='root',
-            password='2459'
+            password='Uu12345-'
         )
         cursor = conn.cursor(cursor_class=CMySQLCursor, buffered=True)
 
@@ -207,7 +207,7 @@ global camera_ip
 # this endpoint for the user camera add
 @app.route('/user/camera/add', methods=['POST'])
 def add_camera():
-    global camera_id,camera_ip  
+    global camera_id,camera_ip,confidence
 
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
@@ -237,6 +237,7 @@ def add_camera():
     query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, confidence_threshold, userid) VALUES (%s, %s, %s, %s, %s)"
     values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.confidence_threshold, userid)
     camera_ip = camera_data.camera_ip
+    confidence = camera_data.confidence_threshold
     try:
         cursor.execute(query, values)
         conn.commit()
@@ -250,8 +251,9 @@ def add_camera():
 #this endpoint for the user camera update
 @app.route('/user/camera/update', methods=['PUT'])
 def update_camera():
+    global connected,ret,confidence
     global connected_cameras
-
+    global camera_ip
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
         return jsonify({"message": "Authorization header is missing"})
@@ -295,6 +297,9 @@ def update_camera():
             if cam_id == camera_id_to_update:
                 print('Disconnecting Socket ID:', socket_id)
                 socketio.server.disconnect(socket_id)
+                confidence = camera_data.confidence_threshold
+                connected=False
+                ret= False
                 break
 
         return jsonify({"message": "Camera updated successfully"})
@@ -305,6 +310,9 @@ def update_camera():
 #this endpoint for the user camera delete
 @app.route('/user/camera/delete', methods=['DELETE'])
 def delete_camera():
+    global connected,ret,confidence
+    global connected_cameras
+    global camera_ip
     auth_header = request.headers.get('Authorization')
     if not auth_header:
         return jsonify({"message": "Authorization header is missing"}), 401
@@ -338,6 +346,13 @@ def delete_camera():
         delete_query = "DELETE FROM Camera WHERE camera_id = %s"
         cursor.execute(delete_query, (camera_id_to_delete,))
         conn.commit()
+        for socket_id, cam_id in connected_cameras.items():
+            if cam_id == camera_id_to_delete:
+                print('Disconnecting Socket ID:', socket_id)
+                socketio.server.disconnect(socket_id)
+                connected=False
+                ret= False
+                break
 
         # Re-enable foreign key checks
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -352,16 +367,17 @@ def delete_camera():
 connected = False
 #this is for the socketio(Background thread)
 def background_thread():
+    global ret,confidence
     global connected
     while connected:
         license_dict={}
-        threshold=0.2
+        threshold=confidence
         #LPR model init
         lpr_model_path = "./models/lpr+orientation.pt"
         model = YOLO(lpr_model_path)  
 
-        cap = cv2.VideoCapture('testing_images/al.mp4')
-        while (cap.isOpened()):
+        cap = cv2.VideoCapture(camera_ip)
+        while (cap.isOpened() and connected == True):
             # Capture frame-by-frame
             ret, img = cap.read()
             if not ret:
