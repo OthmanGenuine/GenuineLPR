@@ -253,7 +253,7 @@ def add_camera():
 def update_camera():
     global connected,ret,confidence
     global connected_cameras
-    global camera_ip
+    global camera_ip, registered
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
         return jsonify({"message": "Authorization header is missing"})
@@ -298,8 +298,7 @@ def update_camera():
                 print('Disconnecting Socket ID:', socket_id)
                 socketio.server.disconnect(socket_id)
                 confidence = camera_data.confidence_threshold
-                connected=False
-                ret= False
+                registered = False
                 break
 
         return jsonify({"message": "Camera updated successfully"})
@@ -363,12 +362,544 @@ def delete_camera():
         conn.rollback()
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         return jsonify({"message": "Failed to delete camera", "error": str(error)}), 500
+    
+
+@app.route('/user/analytics', methods=['GET'])
+def user_analytics():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    try:
+        # Fetch analytics data related to the user's cameras
+        analytics_query = """
+            SELECT camera_id, COUNT(*) AS request_count 
+            FROM Request 
+            WHERE userid = %s 
+            GROUP BY camera_id
+        """
+        cursor.execute(analytics_query, (userid,))
+        analytics_data = cursor.fetchall()
+
+        # Example analytics data format
+        analytics = []
+        for row in analytics_data:
+            camera_id, request_count = row
+            analytics.append({
+                "camera_id": camera_id,
+                "request_count": request_count
+            })
+
+        return jsonify({"analytics": analytics}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch analytics", "error": str(error)}), 500
+    
+@app.route('/user/requests_between_periods', methods=['POST'])
+def requests_between_periods():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    # Fetching time periods from the request body
+    data = request.json
+    start_time = data.get('start_time')
+    end_time = data.get('end_time')
+
+    try:
+        # Convert start_time and end_time strings to datetime objects
+        start_time_dt = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+        end_time_dt = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
+
+        # Fetch requests that occurred between the specified time periods
+        requests_query = """
+            SELECT * FROM Request 
+            WHERE userid = %s 
+            AND request_datetime >= %s 
+            AND request_datetime <= %s
+        """
+        cursor.execute(requests_query, (userid, start_time_dt, end_time_dt))
+        requests_data = cursor.fetchall()
+
+        # Constructing the response with requests between the periods
+        requests_between_periods = []
+        for row in requests_data:
+            request_info = {
+                "request_id": row[0],
+                "camera_id": row[1],
+                "request_datetime":str(row[9]),
+               "image": base64.b64encode(row[8]).decode('utf-8') if row[8] else None,
+                # Add other columns as needed
+            }
+            requests_between_periods.append(request_info)
+
+        return jsonify({"requests_between_periods": requests_between_periods}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch requests between periods", "error": str(error)}), 500
+
+@app.route('/user/vehicle_type_percentage', methods=['GET'])
+def vehicle_type_percentage():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    try:
+        # Fetching vehicle types and their counts for the user
+        query = """
+            SELECT vehicle_type, COUNT(vehicle_type) as type_count
+            FROM Request 
+            WHERE userid = %s 
+            GROUP BY vehicle_type
+        """
+        cursor.execute(query, (userid,))
+        rows = cursor.fetchall()
+
+        # Constructing the response with vehicle type percentages
+        vehicle_types = []
+        total_requests = 0
+
+        for row in rows:
+            vehicle_type = row[0]
+            type_count = row[1]
+            total_requests += type_count
+            vehicle_types.append({
+                'vehicle_type': vehicle_type,
+                'percentage': (type_count / total_requests) * 100
+            })
+
+        return jsonify({"vehicle_type_percentage": vehicle_types}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch vehicle type percentage", "error": str(error)}), 500
+
+
+@app.route('/user/car_info', methods=['POST'])
+def car_info():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    data = request.json
+    plate = data.get('plate')  # Plate value entered by the user
+
+    if not plate:
+        return jsonify({"message": "Plate is missing in the request"}), 400
+
+    # Check both columns for the plate
+    plate_columns = ["plate_arabic", "plate_english"]
+
+    try:
+        # Fetch information related to the entered plate
+        car_info_list = []
+        for plate_column in plate_columns:
+            car_info_query = f"""
+                SELECT * FROM Request 
+                WHERE userid = %s 
+                AND {plate_column} = %s
+            """
+            cursor.execute(car_info_query, (userid, plate))
+            car_info = cursor.fetchall()
+
+            # Constructing the response with car information
+            for row in car_info:
+                info = {
+                    "image": base64.b64encode(row[8]).decode('utf-8') if row[8] else None,
+                    "vehicle_type": row[2],  
+                    "license_type": row[3],
+                    "plate_arabic": row[4],
+                    "plate_english": row[5],
+                    "datetime": row[9],
+                    
+                    
+
+                    # Add other columns as needed
+                }
+                car_info_list.append(info)
+
+        return jsonify({"car_information": car_info_list}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch car information", "error": str(error)}), 500
+@app.route('/user/peak_times', methods=['GET'])
+def get_peak_times():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    try:
+        # Fetching the user ID based on the username
+        query_check = "SELECT userid FROM User WHERE username = %s"
+        cursor.execute(query_check, (username,))
+        user = cursor.fetchone()
+        if not user:
+            return jsonify({"message": "User does not exist"}), 404
+    
+        userid = user[0]
+
+        # Analyzing peak times and non-peak times based on requests
+        query = """
+            SELECT HOUR(request_datetime) AS hour_slot, COUNT(*) AS request_count
+            FROM Request
+            WHERE userid = %s
+            GROUP BY hour_slot
+        """
+        cursor.execute(query, (userid,))
+        results = cursor.fetchall()
+        peak_times = []
+        non_peak_times = []
+
+        for result in results:
+            hour_slot = result[0]
+            request_count = result[1]
+
+            # Convert hour slots to time ranges (assuming hourly intervals)
+            time_range = f"{hour_slot}:00 - {hour_slot + 1}:00"
+
+            # Define your threshold for peak and non-peak times
+            if request_count >= 10:  # Replace with your threshold value
+                peak_times.append(hour_slot)
+            else:
+                non_peak_times.append(hour_slot)
+
+        # Convert hour slots to human-readable time ranges
+        peak_times = convert_to_time_ranges(peak_times)
+        non_peak_times = convert_to_time_ranges(non_peak_times)
+
+        return jsonify({
+            "peak_times": peak_times,
+            "non_peak_times": non_peak_times
+        }), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch peak times", "error": str(error)}), 500
+
+# Function to convert hour slots into time ranges
+def convert_to_time_ranges(times):
+    times.sort()
+    ranges = []
+    start = None
+    prev = None
+
+    for time in times:
+        if start is None:
+            start = time
+            prev = time
+        elif prev + 1 == time:
+            prev = time
+        else:
+            if start == prev:
+                ranges.append(f"{start}:00")
+            else:
+                ranges.append(f"{start}:00-{prev + 1}:00")
+            start = time
+            prev = time
+
+    if start is not None:
+        if start == prev:
+            ranges.append(f"{start}:00")
+        else:
+            ranges.append(f"{start}:00-{prev + 1}:00")
+
+    return ranges
+@app.route('/user/best_day_in_month', methods=['POST'])
+def best_day_in_month():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+
+    userid = user[0]
+
+    data = request.json
+    month = data.get('month')  # Month provided by the user (e.g., 1 for January)
+
+    try:
+        # Get the year and month from the provided value
+        year = datetime.now().year  # You might need to handle year input from the user
+        start_date = datetime(year, month, 1)
+        end_date = datetime(year, month + 1 if month < 12 else 1, 1)  # End of the next month
+
+        # Fetch the number of requests for each day in the month
+        query = """
+            SELECT DAY(request_datetime) AS request_day, COUNT(*) AS request_count
+            FROM Request
+            WHERE userid = %s
+            AND request_datetime >= %s
+            AND request_datetime < %s
+            GROUP BY request_day
+            ORDER BY request_count DESC
+            LIMIT 1
+        """
+        cursor.execute(query, (userid, start_date, end_date))
+        best_day_info = cursor.fetchone()
+
+        if not best_day_info:
+            return jsonify({"message": "No requests found for the given month"}), 404
+
+        best_day = best_day_info[0]
+        request_count = best_day_info[1]
+
+        return jsonify({
+            "best_day": best_day,
+            "request_count": request_count
+        }), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch best day in the month", "error": str(error)}), 500
+    
+
+@app.route('/user/best_month_in_year', methods=['POST'])
+def best_month_in_year():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    data = request.json
+    year = data.get('year')
+
+    if not year:
+        return jsonify({"message": "Year missing in the request"}), 400
+
+    try:
+        # Query to find the best month based on the number of requests
+        best_month_query = """
+            SELECT MONTH(request_datetime) as month, COUNT(*) as request_count
+            FROM Request
+            WHERE userid = %s AND YEAR(request_datetime) = %s
+            GROUP BY MONTH(request_datetime)
+            ORDER BY request_count DESC
+            LIMIT 1
+        """
+        cursor.execute(best_month_query, (userid, year))
+        best_month_data = cursor.fetchone()
+
+        if not best_month_data:
+            return jsonify({"message": "No data found for the given year"}), 404
+
+        best_month_number = best_month_data[0]  # Extract the best month number
+
+        # Manually mapping month numbers to month names
+        month_names = {
+            1: "January", 2: "February", 3: "March", 4: "April",
+            5: "May", 6: "June", 7: "July", 8: "August",
+            9: "September", 10: "October", 11: "November", 12: "December"
+        }
+
+        best_month_name = month_names.get(best_month_number)
+        best_month_request_count = best_month_data[1]  
+
+
+        all_months_query = """
+            SELECT MONTH(request_datetime) as month, COUNT(*) as request_count
+            FROM Request
+            WHERE userid = %s AND YEAR(request_datetime) = %s
+            GROUP BY MONTH(request_datetime)
+        """
+        cursor.execute(all_months_query, (userid, year))
+        all_months_data = cursor.fetchall()
+
+  
+        all_months_request_counts = {month: count for month, count in all_months_data}
+
+        # Create response data
+        response_data = {
+            "best_month": best_month_name,
+            "request_count": best_month_request_count,
+
+        }
+
+        return jsonify(response_data), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch data", "error": str(error)}), 500
+
+@app.route('/user/get_info', methods=['GET'])
+def get_user_info():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    try:
+        query = "SELECT * FROM User WHERE username = %s"
+        cursor.execute(query, (username,))
+        user_info = cursor.fetchone()
+
+        if not user_info:
+            return jsonify({"message": "User not found"}), 404
+
+        user_data = {
+            
+            "username": user_info[1],
+            "email": user_info[2],
+            "typeofplan": user_info[3],
+            "request_count": user_info[5],
+            # Include other user information columns here
+        }
+
+        return jsonify({"user_information": user_data}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch user information", "error": str(error)}), 500
+
+
+
+@app.route('/user/all_requests', methods=['GET'])
+def all_user_requests():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+
+    userid = user[0]
+
+    try:
+        # Query to fetch all requests for the user
+        all_requests_query = """
+            SELECT * FROM Request
+            WHERE userid = %s
+        """
+        cursor.execute(all_requests_query, (userid,))
+        all_requests = cursor.fetchall()
+
+        # Constructing the response with all user requests
+        user_requests = []
+        for row in all_requests:
+            request_info = {
+                "request_id": row[0],
+                "camera_id": row[1],
+                "camera_name": row[10],
+                "license_type": row[3],
+                "vechile_type":row[2],
+                "request_datetime":str(row[9]),
+                # Include other columns as needed
+            }
+            user_requests.append(request_info)
+
+        return jsonify({"user_requests": user_requests}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch user requests", "error": str(error)}), 500
 
 connected = False
 #this is for the socketio(Background thread)
 def background_thread():
     global ret,confidence
     global connected
+    global registered
     while connected:
         license_dict={}
         threshold=confidence
@@ -377,7 +908,7 @@ def background_thread():
         model = YOLO(lpr_model_path)  
 
         cap = cv2.VideoCapture(camera_ip)
-        while (cap.isOpened() and connected == True):
+        while (cap.isOpened() and registered == True):
             # Capture frame-by-frame
             ret, img = cap.read()
             if not ret:
