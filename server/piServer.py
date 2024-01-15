@@ -319,7 +319,7 @@ def add_camera():
 def update_camera():
     global connected,ret,confidence
     global connected_cameras
-    global camera_ip, registered
+    global camera_ip
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
         return jsonify({"message": "Authorization header is missing"})
@@ -368,7 +368,6 @@ def update_camera():
                 print('Disconnecting Socket ID:', socket_id)
                 socketio.server.disconnect(socket_id)
                 confidence = camera_data.confidence_threshold
-                registered = False
                 break
 
         return jsonify({"message": "Camera updated successfully"})
@@ -1042,7 +1041,6 @@ connected = False
 def background_thread():
     global ret,confidence
     global connected
-    global registered
     while connected:
         license_dict={}
         threshold=confidence
