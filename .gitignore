@@ -1,1 +1,4 @@
 .venv/
+genuine_local.db
+__pycache__
+server/__pycache__

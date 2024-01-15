@@ -17,10 +17,13 @@ from ultralytics import YOLO
 from support_methods import license_formatting_ar,license_formatting_en,carAndPositionDetect,colorDetect
 import cv2
 import numpy as np
-
+from apscheduler.schedulers.background import BackgroundScheduler
+import sqlite3
+import scheduler
+from apscheduler.triggers.interval import IntervalTrigger
 app = Flask(__name__)
 socketio = SocketIO(app)
-
+scheduler = BackgroundScheduler(timezone="Asia/Riyadh")
 
 SWAGGER_URL = '/api/docs'  # URL for exposing Swagger UI (without trailing '/')
 API_URL = '/static/swagger.json'  # file location
@@ -39,17 +42,23 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 app.register_blueprint(swaggerui_blueprint)
 
 #this is for connecting to the database with  project enter your database information here
-while True:
+mysql_success = False
+sqlite_success = False
+
+while not (mysql_success and sqlite_success):
     try:
+        # MySQL setup
         conn = mysql.connector.connect(
             host='localhost',
-            database='testDB',
+            database='project',
             user='root',
-            password='Uu12345-'
+            password='2459'
         )
         cursor = conn.cursor(cursor_class=CMySQLCursor, buffered=True)
+        cursor.execute("CREATE DATABASE IF NOT EXISTS local_genuine")
+        print("MySQL Database created successfully!")
 
-
+        # MySQL queries for creating tables
         queries = [
             """
             CREATE TABLE IF NOT EXISTS User (
@@ -76,7 +85,6 @@ while True:
                 camera_name VARCHAR(255),
                 FOREIGN KEY (userid) REFERENCES User(userid),
                 FOREIGN KEY (camera_id) REFERENCES Camera(camera_id)
-                
             )
             """,
             """
@@ -93,17 +101,67 @@ while True:
             """,
         ]
 
+  
         for query in queries:
             cursor.execute(query)
 
-        print("Database connection was successful!")
-        break
-    except mysql.connector.Error as error:
-        print("Connecting to the database failed")
-        print("Error:", error)
-        time.sleep(2)
+        print("MySQL Database connection and table creation successful!")
+      
+        mysql_success = True
 
-#this is for the validation shcema for the user
+        # SQLite setup
+        local_conn = sqlite3.connect('genuine_local.db', check_same_thread=False)
+        local_cursor = local_conn.cursor()
+    
+
+
+        local_cursor.execute('''
+            CREATE TABLE IF NOT EXISTS Camera (
+                camera_id INTEGER,
+                camera_ip VARCHAR(255),
+                raspberrypi_id VARCHAR(255),
+                userid INTEGER,
+                camera_name VARCHAR(255),
+                camera_mode VARCHAR(50),
+                confidence_threshold FLOAT
+            )
+        ''')
+        local_cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS Request(
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTGER, 
+                vehicle_type VARCHAR(100),
+                license_type VARCHAR(100),
+                plate_arabic VARCHAR(100),
+                plate_english VARCHAR(100),
+                confidence FLOAT,
+                orientation VARCHAR(50),
+                photo_data BLOB,
+                request_datetime TEXT,
+                camera_name VARCHAR(255),    
+                camera_id INTEGER
+            )
+        ''')
+        # Commit changes and close the connection
+        local_conn.commit()
+        
+
+        print("SQLite Database and Camera table created successfully!")
+        print("SQLite Database connection was successful!")
+        sqlite_success = True
+
+    except mysql.connector.Error as mysql_error:
+        print("MySQL Connection or setup failed")
+        print("MySQL Error:", mysql_error)
+
+    except sqlite3.Error as sqlite_error:
+        print("SQLite Connection or setup failed")
+        print("SQLite Error:", sqlite_error)
+
+    time.sleep(5)  # Wait 5 seconds before attempting MySQL and SQLite setup again
+
+# Both databases connected successfully, break out of the loop
+print("Both MySQL and SQLite databases connected successfully!")
 
 class LoginData(BaseModel):
     username: str
@@ -207,7 +265,9 @@ global camera_ip
 # this endpoint for the user camera add
 @app.route('/user/camera/add', methods=['POST'])
 def add_camera():
-    global camera_id,camera_ip,confidence
+    global camera_id, camera_ip, confidence
+
+    camera_id = None  # Define camera_id here
 
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
@@ -235,6 +295,7 @@ def add_camera():
         return jsonify({"message": "Validation error", "error": str(e)})
 
     query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, confidence_threshold, userid) VALUES (%s, %s, %s, %s, %s)"
+    sqlite_query = "INSERT INTO Camera (camera_id, camera_name, camera_mode, camera_ip, confidence_threshold, userid) VALUES (?, ?, ?, ?, ?, ?)"
     values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.confidence_threshold, userid)
     camera_ip = camera_data.camera_ip
     confidence = camera_data.confidence_threshold
@@ -243,6 +304,11 @@ def add_camera():
         conn.commit()
 
         camera_id = cursor.lastrowid  # Update the global variable with the last inserted camera_id
+
+        # Insert the same data into the local database
+        sqlite_values = (camera_id, camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.confidence_threshold, userid)
+        local_cursor.execute(sqlite_query, sqlite_values)
+        local_conn.commit()
 
         return jsonify({"message": "Camera added successfully", "camera_id": camera_id})
     except mysql.connector.Error as error:
@@ -287,11 +353,15 @@ def update_camera():
     camera_id_to_update = camera_data.camera_id
 
     query = "UPDATE Camera SET camera_name = %s, camera_mode = %s, confidence_threshold = %s, camera_ip = %s WHERE camera_id = %s"
+    sqlite_query = "UPDATE Camera SET camera_name = ?, camera_mode = ?, confidence_threshold = ?, camera_ip = ? WHERE camera_id = ?"
     values = (camera_data.camera_name, camera_data.camera_mode, camera_data.confidence_threshold, camera_data.camera_ip, camera_id_to_update)
 
     try:
+        
         cursor.execute(query, values)
         conn.commit()
+        local_cursor.execute(sqlite_query,values)
+        local_conn.commit()
 
         for socket_id, cam_id in connected_cameras.items():
             if cam_id == camera_id_to_update:
@@ -338,13 +408,23 @@ def delete_camera():
         return jsonify({"message": "Missing camera_id in the request"}), 400
 
     try:
+        # Check if the camera exists in the local database
+        local_cursor.execute("SELECT camera_id FROM Camera WHERE camera_id = ?", (camera_id_to_delete,))
+        camera = local_cursor.fetchone()
+        if not camera:
+            return jsonify({"message": "Camera does not exist in the local database"}), 404
+
         # Disable foreign key checks
         cursor.execute("SET FOREIGN_KEY_CHECKS=0")
 
         # Now, delete the camera
         delete_query = "DELETE FROM Camera WHERE camera_id = %s"
+        sqlite_delete_query = "DELETE FROM Camera WHERE camera_id = ?"
         cursor.execute(delete_query, (camera_id_to_delete,))
         conn.commit()
+        local_cursor.execute(sqlite_delete_query, (camera_id_to_delete,))
+        local_conn.commit()  # Don't forget the parentheses
+
         for socket_id, cam_id in connected_cameras.items():
             if cam_id == camera_id_to_delete:
                 print('Disconnecting Socket ID:', socket_id)
@@ -362,6 +442,7 @@ def delete_camera():
         conn.rollback()
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         return jsonify({"message": "Failed to delete camera", "error": str(error)}), 500
+     
     
 
 @app.route('/user/analytics', methods=['GET'])
@@ -894,7 +975,69 @@ def all_user_requests():
     except mysql.connector.Error as error:
         return jsonify({"message": "Failed to fetch user requests", "error": str(error)}), 500
 
+@app.route('/local-requests/all', methods=['GET'])
+def all_user_local_requests():
+    try:
+       
+        local_conn = sqlite3.connect('genuine_local.db')
+        local_cursor = local_conn.cursor()
+
+        all_requests_query = """
+            SELECT * FROM Request
+        """
+        local_cursor.execute(all_requests_query)
+        all_requests = local_cursor.fetchall()
+        user_requests = []
+        for row in all_requests:
+            request_info = {
+                "request_id": row[0],
+                "camera_id": row[1],
+                "camera_name": row[10],
+                "license_type": row[3],
+                "vechile_type": row[2],
+                "request_datetime": str(row[9]),
+                
+            }
+            user_requests.append(request_info)
+        
+        
+        local_conn.close()
+
+        return jsonify({"local_database": user_requests}), 200
+
+    except sqlite3.Error as error:  # Catch sqlite3 errors
+        return jsonify({"message": "Failed to fetch user requests", "error": str(error)}), 500
+ #function to delete all records from local database   
+def delete_records():
+    try:
+        # SQLite setup
+        local_conn = sqlite3.connect('genuine_local.db', check_same_thread=False)
+        local_cursor = local_conn.cursor()
+
+        # Delete records
+        local_cursor.execute('DELETE FROM Request')
+        local_conn.commit()
+
+    except Exception as e:
+        print(f"Error in delete_records: {str(e)}")
+
+    finally:
+        # Close the database connection
+        local_conn.close()
+
+@app.route('/schedule_delete', methods=['POST'])
+def schedule_delete():
+    hours = request.json.get('hours', 24)  # Default to 24 hours if not provided
+
+    # Remove all existing jobs
+    scheduler.remove_all_jobs()
+
+    # Schedule the delete_records function to run every N hours
+    scheduler.add_job(delete_records, trigger=IntervalTrigger(hours=hours))
+
+    return jsonify({"message": f"Scheduled deletion of all records every {hours} hours."})  
 connected = False
+
 #this is for the socketio(Background thread)
 def background_thread():
     global ret,confidence
@@ -908,7 +1051,7 @@ def background_thread():
         model = YOLO(lpr_model_path)  
 
         cap = cv2.VideoCapture(camera_ip)
-        while (cap.isOpened() and registered == True):
+        while (cap.isOpened() and connected == True):
             # Capture frame-by-frame
             ret, img = cap.read()
             if not ret:
@@ -1045,6 +1188,21 @@ def vehicle_query(license_dict):
             request_datetime
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s)
         """
+    sqlite_sql = """
+        INSERT INTO Request (
+            user_id,
+            camera_id,
+            camera_name,
+            vehicle_type,
+            license_type,
+            plate_arabic,
+            plate_english,
+            confidence,
+            orientation,
+            photo_data,
+            request_datetime
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
+        """
 
     cursor.execute(sql, (
             license_dict['userid'],
@@ -1059,6 +1217,21 @@ def vehicle_query(license_dict):
             license_dict['photo_data'],
             license_dict['request_datetime'],
         ))
+    local_cursor.execute(sqlite_sql, (
+            license_dict['userid'],
+            license_dict['camera_id'],
+            license_dict['camera_name'],
+            license_dict['vehicle_type'],
+            license_dict['license_type'],
+            license_dict['plate_in_arabic'],
+            license_dict['plate_in_english'],
+            license_dict['confidence'],
+            license_dict['orientation'],
+            license_dict['photo_data'],
+            license_dict['request_datetime'],
+        ))
+    local_conn.commit()
+
 
         # Increment the request_count in the User table
     sql_update = """
@@ -1076,8 +1249,8 @@ connected_cameras = {}
 #this is for the socketio connection
 @socketio.on('connect')
 def handle_connect():
- 
-    global connected, userid, camera_id, camera_name,connected_cameras
+    global connected, userid, camera_id, camera_name, connected_cameras, camera_mode, confidence, camera_ip
+
     token = request.headers.get('X-My-Auth')
     camera_id = request.headers.get('X-Camera-Id')  # Get the camera id from the header
 
@@ -1107,6 +1280,12 @@ def handle_connect():
         
         camera_name = camera[0]  # Store the camera name
 
+        # Query the local database for the camera_mode, confidence_threshold, and camera_ip
+        local_cursor.execute("SELECT camera_mode, confidence_threshold, camera_ip FROM Camera WHERE camera_id = ?", (camera_id,))
+        result = local_cursor.fetchone()
+        if result is not None:
+            camera_mode, confidence, camera_ip = result
+
         print('Client connected, Camera ID:', camera_id, 'Camera Name:', camera_name)  # Print the camera id and name
         connected = True
         userid = user[0]  # Store the user id
@@ -1133,5 +1312,6 @@ def handle_disconnect():
 
 
 if __name__ == '__main__':
+    scheduler.start()
     app.run(debug=True)
     socketio.run(app, debug=True)
