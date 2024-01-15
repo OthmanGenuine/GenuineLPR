@@ -13,3 +13,6 @@ ultralytics==8.0.226
 torch==2.1.1
 torchaudio==2.1.1
 torchvision==0.16.1
+sqlite3==3 0.5.2
+scheduler==0.8.5
+APScheduler==4.0.0a3
