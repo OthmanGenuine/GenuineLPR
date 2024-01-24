@@ -1,14 +1,11 @@
 from flask import Flask, request, jsonify, abort
-from flask_swagger_ui import get_swaggerui_blueprint
 import mysql
 import time
 from mysql.connector.cursor_cext import CMySQLCursor
-from pydantic import BaseModel, ValidationError,EmailStr, Field,confloat
+
 from passlib.hash import pbkdf2_sha256
 from datetime import datetime
 from jose import JWTError, jwt
-import secrets
-from typing import Optional
 import json
 from flask_socketio import SocketIO, emit,disconnect
 import threading
@@ -21,27 +18,19 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import sqlite3
 import scheduler
 from apscheduler.triggers.interval import IntervalTrigger
+import pymysql
+from mysql.connector import Error
+import logging
 app = Flask(__name__)
 socketio = SocketIO(app)
 scheduler = BackgroundScheduler(timezone="Asia/Riyadh")
 
-SWAGGER_URL = '/api/docs'  # URL for exposing Swagger UI (without trailing '/')
-API_URL = '/static/swagger.json'  # file location
 
 
-swaggerui_blueprint = get_swaggerui_blueprint(
-    SWAGGER_URL,  # Swagger UI static files will be mapped to '{SWAGGER_URL}/dist/'
-    API_URL,
-    config={  # Swagger UI config overrides
-        'app_name': "Test application"
-    
-   
-    }
-)
-
-app.register_blueprint(swaggerui_blueprint)
 
 #this is for connecting to the database with  project enter your database information here
+
+
 mysql_success = False
 sqlite_success = False
 
@@ -57,7 +46,18 @@ while not (mysql_success and sqlite_success):
         cursor = conn.cursor(cursor_class=CMySQLCursor, buffered=True)
         cursor.execute("CREATE DATABASE IF NOT EXISTS local_genuine")
         print("MySQL Database created successfully!")
-
+        while True:
+            try:
+                conn.ping(reconnect=True)
+                time_restored = time.time()
+                print(f"Connection restored at {time_restored}")
+                # If ping is successful, break the loop
+                break
+            except Error as e:
+                time_lost = time.time()
+                print(f"Connection lost at {time_lost}")
+                # Wait for a while before trying to reconnect
+                time.sleep(5)
         # MySQL queries for creating tables
         queries = [
             """
@@ -83,6 +83,8 @@ while not (mysql_success and sqlite_success):
                 photo_data MEDIUMBLOB,
                 request_datetime DATETIME,
                 camera_name VARCHAR(255),
+                car_color VARCHAR(50),
+                car_bodytype VARCHAR(50),
                 FOREIGN KEY (userid) REFERENCES User(userid),
                 FOREIGN KEY (camera_id) REFERENCES Camera(camera_id)
             )
@@ -96,6 +98,7 @@ while not (mysql_success and sqlite_success):
                 camera_name VARCHAR(255),
                 camera_mode VARCHAR(50), 
                 confidence_threshold FLOAT,
+                camera_port INTEGER,
                 FOREIGN KEY (userid) REFERENCES User(userid)
             )
             """,
@@ -139,7 +142,9 @@ while not (mysql_success and sqlite_success):
                 photo_data BLOB,
                 request_datetime TEXT,
                 camera_name VARCHAR(255),    
-                camera_id INTEGER
+                camera_id INTEGER,
+                car_color VARCHAR(50),
+                car_bodytype VARCHAR(50)
             )
         ''')
         # Commit changes and close the connection
@@ -162,885 +167,187 @@ while not (mysql_success and sqlite_success):
 
 # Both databases connected successfully, break out of the loop
 print("Both MySQL and SQLite databases connected successfully!")
+""""
+time_lost_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time_lost))
+time_restored_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time_restored))
 
-class LoginData(BaseModel):
-    username: str
-    password: str
 
-class User(BaseModel):
-    username: str = Field(
-        ...,
-        min_length=3,
-        max_length=50,
-        description="Username should have 3-50 characters",
-    )
-    email: EmailStr = Field(
-        ...,
-        min_length=6,
-        max_length=100,
-        description="Email should have 6-100 characters",
-    )
-    typeofplan: str
-    password: str = Field(
-        ...,
-        min_length=6,
-        max_length=50,
-        description="Password should have 6-50 characters",
-    )
-class CameraData(BaseModel):
-    camera_id: Optional[str] = None
-    camera_name: str
-    camera_mode: str
-    camera_ip: str
-    confidence_threshold: confloat(strict=True, lt=1.0)
+local_cursor.execute("SELECT * FROM Request WHERE request_datetime BETWEEN ? AND ?", (time_lost_str, time_restored_str))
 
-#this is for the token 
+
+rows = local_cursor.fetchall()
+for row in rows:
+  
+    insert_query = ""
+        INSERT INTO Request (
+            userid,
+            camera_id,
+            camera_name,
+            vehicle_type,
+            license_type,
+            plate_arabic,
+            plate_english,
+            confidence,
+            orientation,
+            photo_data,
+            request_datetime
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s)
+        ""
+
+
+    cursor.execute(insert_query, row)
+
+
+conn.commit()
+"""
+
+global camera_ip
+SQLITE_DATABASE_FILE = 'genuine_local.db'
+
 SECRET_KEY = "245"
 ALGORITHM = "HS256"
-#this is for the token creation
-def create_access_token(*, username: str):
-    to_encode = {"username": username}
-    # expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    # to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-#this is for the token decoding 
 def decode_access_token(*, token: str):
     try:
         decoded_jwt = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return decoded_jwt
     except jwt.PyJWTError:
         return {"message": "Could not decode token"}
-#this endpoint for the user registration
-@app.route('/user/register', methods=['POST'])
-def register_user():
-    try:
-        user_data = User(**request.json)
-    except ValidationError as e:
-        return jsonify({"message": "Validation error", "error": str(e)})
 
+
+
+def create_sqlite_connection():
+    return sqlite3.connect(SQLITE_DATABASE_FILE)
+
+
+@app.route('/save_to_sqlite', methods=['POST'])
+def save_to_sqlite():
+    try:
    
-    query_check = "SELECT username FROM User WHERE username = %s"
-    cursor.execute(query_check, (user_data.username,))
-    existing_user = cursor.fetchone()
-    cursor.fetchall()
-    if existing_user:
-        return jsonify({"message": "Username already exists"})
-
-    hashed_password = pbkdf2_sha256.hash(user_data.password)
-    query = "INSERT INTO User (username, email, typeofplan, password) VALUES (%s, %s, %s, %s)"
-    values = (user_data.username, user_data.email, user_data.typeofplan, hashed_password)
-
-    try:
-        cursor.execute(query, values)
-        conn.commit()
-        return jsonify({"message": "User registration successful"})
-    except mysql.connector.Error as error:
-        conn.rollback()
-        return jsonify({"message": "User registration failed", "error": str(error)})
-#this endpoint for the user login
-@app.route('/user/login', methods=['POST'])
-def login_user():
-    try:
-        login_data = LoginData(**request.json)
-    except ValidationError as e:
-        return jsonify({"message": "Validation error", "error": str(e)})
-
-   
-    query_check = "SELECT password FROM User WHERE username = %s"
-    cursor.execute(query_check, (login_data.username,))
-    user = cursor.fetchone()
-    cursor.fetchall()
-    if not user:
-        return jsonify({"message": "Username does not exist"})
-    
- 
-    if pbkdf2_sha256.verify(login_data.password, user[0]):
-        access_token = create_access_token(username=login_data.username)
-        return jsonify({"message": "Login successful", "access_token": access_token})
-    else:
-        return jsonify({"message": "Incorrect password"})
-
-global camera_ip
-# this endpoint for the user camera add
-@app.route('/user/camera/add', methods=['POST'])
-def add_camera():
-    global camera_id, camera_ip, confidence
-
-    camera_id = None  # Define camera_id here
-
-    auth_header = request.headers.get('Authorization', None)
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"})
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt)
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    cursor.fetchall()
-    if not user:
-        return jsonify({"message": "User does not exist"})
-
-    userid = user[0]
-
-    try:
-        camera_data = CameraData(**request.json)
-    except ValidationError as e:
-        return jsonify({"message": "Validation error", "error": str(e)})
-
-    query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, confidence_threshold, userid) VALUES (%s, %s, %s, %s, %s)"
-    sqlite_query = "INSERT INTO Camera (camera_id, camera_name, camera_mode, camera_ip, confidence_threshold, userid) VALUES (?, ?, ?, ?, ?, ?)"
-    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.confidence_threshold, userid)
-    camera_ip = camera_data.camera_ip
-    confidence = camera_data.confidence_threshold
-    try:
-        cursor.execute(query, values)
-        conn.commit()
-
-        camera_id = cursor.lastrowid  # Update the global variable with the last inserted camera_id
-
-        # Insert the same data into the local database
-        sqlite_values = (camera_id, camera_data.camera_name, camera_data.camera_mode, camera_data.camera_ip, camera_data.confidence_threshold, userid)
-        local_cursor.execute(sqlite_query, sqlite_values)
-        local_conn.commit()
-
-        return jsonify({"message": "Camera added successfully", "camera_id": camera_id})
-    except mysql.connector.Error as error:
-        conn.rollback()
-        return jsonify({"message": "Failed to add camera", "error": str(error)})
-#this endpoint for the user camera update
-@app.route('/user/camera/update', methods=['PUT'])
-def update_camera():
-    global connected,ret,confidence
-    global connected_cameras
-    global camera_ip
-    auth_header = request.headers.get('Authorization', None)
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"})
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt)
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"})
-    
-    userid = user[0]
-
-    try:
-        camera_data = CameraData(**request.json)
-    except ValidationError as e:
-        return jsonify({"message": "Validation error", "error": str(e)})
-
-    query_check = "SELECT * FROM Camera WHERE camera_id = %s AND userid = %s"
-    cursor.execute(query_check, (camera_data.camera_id, userid))
-    camera = cursor.fetchone()
-    if not camera:
-        return jsonify({"message": "Camera not found or does not belong to the user"})
-
-    camera_id_to_update = camera_data.camera_id
-
-    query = "UPDATE Camera SET camera_name = %s, camera_mode = %s, confidence_threshold = %s, camera_ip = %s WHERE camera_id = %s"
-    sqlite_query = "UPDATE Camera SET camera_name = ?, camera_mode = ?, confidence_threshold = ?, camera_ip = ? WHERE camera_id = ?"
-    values = (camera_data.camera_name, camera_data.camera_mode, camera_data.confidence_threshold, camera_data.camera_ip, camera_id_to_update)
-
-    try:
-        
-        cursor.execute(query, values)
-        conn.commit()
-        local_cursor.execute(sqlite_query,values)
-        local_conn.commit()
-
-        for socket_id, cam_id in connected_cameras.items():
-            if cam_id == camera_id_to_update:
-                print('Disconnecting Socket ID:', socket_id)
-                socketio.server.disconnect(socket_id)
-                confidence = camera_data.confidence_threshold
-                break
-
-        return jsonify({"message": "Camera updated successfully"})
-    except mysql.connector.Error as error:
-        conn.rollback()
-        return jsonify({"message": "Failed to update camera", "error": str(error)})
-    
-#this endpoint for the user camera delete
-@app.route('/user/camera/delete', methods=['DELETE'])
-def delete_camera():
-    global connected,ret,confidence
-    global connected_cameras
-    global camera_ip
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-    
-    userid = user[0]
-
-    data = request.json
-    camera_id_to_delete = data.get('camera_id')
-
-    if not camera_id_to_delete:
-        return jsonify({"message": "Missing camera_id in the request"}), 400
-
-    try:
-        # Check if the camera exists in the local database
-        local_cursor.execute("SELECT camera_id FROM Camera WHERE camera_id = ?", (camera_id_to_delete,))
-        camera = local_cursor.fetchone()
-        if not camera:
-            return jsonify({"message": "Camera does not exist in the local database"}), 404
-
-        # Disable foreign key checks
-        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
-
-        # Now, delete the camera
-        delete_query = "DELETE FROM Camera WHERE camera_id = %s"
-        sqlite_delete_query = "DELETE FROM Camera WHERE camera_id = ?"
-        cursor.execute(delete_query, (camera_id_to_delete,))
-        conn.commit()
-        local_cursor.execute(sqlite_delete_query, (camera_id_to_delete,))
-        local_conn.commit()  # Don't forget the parentheses
-
-        for socket_id, cam_id in connected_cameras.items():
-            if cam_id == camera_id_to_delete:
-                print('Disconnecting Socket ID:', socket_id)
-                socketio.server.disconnect(socket_id)
-                connected=False
-                ret= False
-                break
-
-        # Re-enable foreign key checks
-        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-
-        return jsonify({"message": "Camera deleted successfully"}), 200
-
-    except mysql.connector.Error as error:
-        conn.rollback()
-        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-        return jsonify({"message": "Failed to delete camera", "error": str(error)}), 500
-     
-    
-
-@app.route('/user/analytics', methods=['GET'])
-def user_analytics():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-    
-    userid = user[0]
-
-    try:
-        # Fetch analytics data related to the user's cameras
-        analytics_query = """
-            SELECT camera_id, COUNT(*) AS request_count 
-            FROM Request 
-            WHERE userid = %s 
-            GROUP BY camera_id
-        """
-        cursor.execute(analytics_query, (userid,))
-        analytics_data = cursor.fetchall()
-
-        # Example analytics data format
-        analytics = []
-        for row in analytics_data:
-            camera_id, request_count = row
-            analytics.append({
-                "camera_id": camera_id,
-                "request_count": request_count
-            })
-
-        return jsonify({"analytics": analytics}), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch analytics", "error": str(error)}), 500
-    
-@app.route('/user/requests_between_periods', methods=['POST'])
-def requests_between_periods():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-    
-    userid = user[0]
-
-    # Fetching time periods from the request body
-    data = request.json
-    start_time = data.get('start_time')
-    end_time = data.get('end_time')
-
-    try:
-        # Convert start_time and end_time strings to datetime objects
-        start_time_dt = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
-        end_time_dt = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
-
-        # Fetch requests that occurred between the specified time periods
-        requests_query = """
-            SELECT * FROM Request 
-            WHERE userid = %s 
-            AND request_datetime >= %s 
-            AND request_datetime <= %s
-        """
-        cursor.execute(requests_query, (userid, start_time_dt, end_time_dt))
-        requests_data = cursor.fetchall()
-
-        # Constructing the response with requests between the periods
-        requests_between_periods = []
-        for row in requests_data:
-            request_info = {
-                "request_id": row[0],
-                "camera_id": row[1],
-                "request_datetime":str(row[9]),
-               "image": base64.b64encode(row[8]).decode('utf-8') if row[8] else None,
-                # Add other columns as needed
-            }
-            requests_between_periods.append(request_info)
-
-        return jsonify({"requests_between_periods": requests_between_periods}), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch requests between periods", "error": str(error)}), 500
-
-@app.route('/user/vehicle_type_percentage', methods=['GET'])
-def vehicle_type_percentage():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-    
-    userid = user[0]
-
-    try:
-        # Fetching vehicle types and their counts for the user
-        query = """
-            SELECT vehicle_type, COUNT(vehicle_type) as type_count
-            FROM Request 
-            WHERE userid = %s 
-            GROUP BY vehicle_type
-        """
-        cursor.execute(query, (userid,))
-        rows = cursor.fetchall()
-
-        # Constructing the response with vehicle type percentages
-        vehicle_types = []
-        total_requests = 0
-
-        for row in rows:
-            vehicle_type = row[0]
-            type_count = row[1]
-            total_requests += type_count
-            vehicle_types.append({
-                'vehicle_type': vehicle_type,
-                'percentage': (type_count / total_requests) * 100
-            })
-
-        return jsonify({"vehicle_type_percentage": vehicle_types}), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch vehicle type percentage", "error": str(error)}), 500
-
-
-@app.route('/user/car_info', methods=['POST'])
-def car_info():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-    
-    userid = user[0]
-
-    data = request.json
-    plate = data.get('plate')  # Plate value entered by the user
-
-    if not plate:
-        return jsonify({"message": "Plate is missing in the request"}), 400
-
-    # Check both columns for the plate
-    plate_columns = ["plate_arabic", "plate_english"]
-
-    try:
-        # Fetch information related to the entered plate
-        car_info_list = []
-        for plate_column in plate_columns:
-            car_info_query = f"""
-                SELECT * FROM Request 
-                WHERE userid = %s 
-                AND {plate_column} = %s
-            """
-            cursor.execute(car_info_query, (userid, plate))
-            car_info = cursor.fetchall()
-
-            # Constructing the response with car information
-            for row in car_info:
-                info = {
-                    "image": base64.b64encode(row[8]).decode('utf-8') if row[8] else None,
-                    "vehicle_type": row[2],  
-                    "license_type": row[3],
-                    "plate_arabic": row[4],
-                    "plate_english": row[5],
-                    "datetime": row[9],
-                    
-                    
-
-                    # Add other columns as needed
-                }
-                car_info_list.append(info)
-
-        return jsonify({"car_information": car_info_list}), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch car information", "error": str(error)}), 500
-@app.route('/user/peak_times', methods=['GET'])
-def get_peak_times():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    try:
-        # Fetching the user ID based on the username
-        query_check = "SELECT userid FROM User WHERE username = %s"
-        cursor.execute(query_check, (username,))
-        user = cursor.fetchone()
-        if not user:
-            return jsonify({"message": "User does not exist"}), 404
-    
-        userid = user[0]
-
-        # Analyzing peak times and non-peak times based on requests
-        query = """
-            SELECT HOUR(request_datetime) AS hour_slot, COUNT(*) AS request_count
-            FROM Request
-            WHERE userid = %s
-            GROUP BY hour_slot
-        """
-        cursor.execute(query, (userid,))
-        results = cursor.fetchall()
-        peak_times = []
-        non_peak_times = []
-
-        for result in results:
-            hour_slot = result[0]
-            request_count = result[1]
-
-            # Convert hour slots to time ranges (assuming hourly intervals)
-            time_range = f"{hour_slot}:00 - {hour_slot + 1}:00"
-
-            # Define your threshold for peak and non-peak times
-            if request_count >= 10:  # Replace with your threshold value
-                peak_times.append(hour_slot)
-            else:
-                non_peak_times.append(hour_slot)
-
-        # Convert hour slots to human-readable time ranges
-        peak_times = convert_to_time_ranges(peak_times)
-        non_peak_times = convert_to_time_ranges(non_peak_times)
-
-        return jsonify({
-            "peak_times": peak_times,
-            "non_peak_times": non_peak_times
-        }), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch peak times", "error": str(error)}), 500
-
-# Function to convert hour slots into time ranges
-def convert_to_time_ranges(times):
-    times.sort()
-    ranges = []
-    start = None
-    prev = None
-
-    for time in times:
-        if start is None:
-            start = time
-            prev = time
-        elif prev + 1 == time:
-            prev = time
-        else:
-            if start == prev:
-                ranges.append(f"{start}:00")
-            else:
-                ranges.append(f"{start}:00-{prev + 1}:00")
-            start = time
-            prev = time
-
-    if start is not None:
-        if start == prev:
-            ranges.append(f"{start}:00")
-        else:
-            ranges.append(f"{start}:00-{prev + 1}:00")
-
-    return ranges
-@app.route('/user/best_day_in_month', methods=['POST'])
-def best_day_in_month():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-
-    userid = user[0]
-
-    data = request.json
-    month = data.get('month')  # Month provided by the user (e.g., 1 for January)
-
-    try:
-        # Get the year and month from the provided value
-        year = datetime.now().year  # You might need to handle year input from the user
-        start_date = datetime(year, month, 1)
-        end_date = datetime(year, month + 1 if month < 12 else 1, 1)  # End of the next month
-
-        # Fetch the number of requests for each day in the month
-        query = """
-            SELECT DAY(request_datetime) AS request_day, COUNT(*) AS request_count
-            FROM Request
-            WHERE userid = %s
-            AND request_datetime >= %s
-            AND request_datetime < %s
-            GROUP BY request_day
-            ORDER BY request_count DESC
-            LIMIT 1
-        """
-        cursor.execute(query, (userid, start_date, end_date))
-        best_day_info = cursor.fetchone()
-
-        if not best_day_info:
-            return jsonify({"message": "No requests found for the given month"}), 404
-
-        best_day = best_day_info[0]
-        request_count = best_day_info[1]
-
-        return jsonify({
-            "best_day": best_day,
-            "request_count": request_count
-        }), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch best day in the month", "error": str(error)}), 500
-    
-
-@app.route('/user/best_month_in_year', methods=['POST'])
-def best_month_in_year():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-    
-    userid = user[0]
-
-    data = request.json
-    year = data.get('year')
-
-    if not year:
-        return jsonify({"message": "Year missing in the request"}), 400
-
-    try:
-        # Query to find the best month based on the number of requests
-        best_month_query = """
-            SELECT MONTH(request_datetime) as month, COUNT(*) as request_count
-            FROM Request
-            WHERE userid = %s AND YEAR(request_datetime) = %s
-            GROUP BY MONTH(request_datetime)
-            ORDER BY request_count DESC
-            LIMIT 1
-        """
-        cursor.execute(best_month_query, (userid, year))
-        best_month_data = cursor.fetchone()
-
-        if not best_month_data:
-            return jsonify({"message": "No data found for the given year"}), 404
-
-        best_month_number = best_month_data[0]  # Extract the best month number
-
-        # Manually mapping month numbers to month names
-        month_names = {
-            1: "January", 2: "February", 3: "March", 4: "April",
-            5: "May", 6: "June", 7: "July", 8: "August",
-            9: "September", 10: "October", 11: "November", 12: "December"
-        }
-
-        best_month_name = month_names.get(best_month_number)
-        best_month_request_count = best_month_data[1]  
-
-
-        all_months_query = """
-            SELECT MONTH(request_datetime) as month, COUNT(*) as request_count
-            FROM Request
-            WHERE userid = %s AND YEAR(request_datetime) = %s
-            GROUP BY MONTH(request_datetime)
-        """
-        cursor.execute(all_months_query, (userid, year))
-        all_months_data = cursor.fetchall()
-
-  
-        all_months_request_counts = {month: count for month, count in all_months_data}
-
-        # Create response data
-        response_data = {
-            "best_month": best_month_name,
-            "request_count": best_month_request_count,
-
-        }
-
-        return jsonify(response_data), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch data", "error": str(error)}), 500
-
-@app.route('/user/get_info', methods=['GET'])
-def get_user_info():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    try:
-        query = "SELECT * FROM User WHERE username = %s"
-        cursor.execute(query, (username,))
-        user_info = cursor.fetchone()
-
-        if not user_info:
-            return jsonify({"message": "User not found"}), 404
-
-        user_data = {
-            
-            "username": user_info[1],
-            "email": user_info[2],
-            "typeofplan": user_info[3],
-            "request_count": user_info[5],
-            # Include other user information columns here
-        }
-
-        return jsonify({"user_information": user_data}), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch user information", "error": str(error)}), 500
-
-
-
-@app.route('/user/all_requests', methods=['GET'])
-def all_user_requests():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
-
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    username = decoded_jwt["username"]
-
-    query_check = "SELECT userid FROM User WHERE username = %s"
-    cursor.execute(query_check, (username,))
-    user = cursor.fetchone()
-    if not user:
-        return jsonify({"message": "User does not exist"}), 404
-
-    userid = user[0]
-
-    try:
-        # Query to fetch all requests for the user
-        all_requests_query = """
-            SELECT * FROM Request
-            WHERE userid = %s
-        """
-        cursor.execute(all_requests_query, (userid,))
-        all_requests = cursor.fetchall()
-
-        # Constructing the response with all user requests
-        user_requests = []
-        for row in all_requests:
-            request_info = {
-                "request_id": row[0],
-                "camera_id": row[1],
-                "camera_name": row[10],
-                "license_type": row[3],
-                "vechile_type":row[2],
-                "request_datetime":str(row[9]),
-                # Include other columns as needed
-            }
-            user_requests.append(request_info)
-
-        return jsonify({"user_requests": user_requests}), 200
-
-    except mysql.connector.Error as error:
-        return jsonify({"message": "Failed to fetch user requests", "error": str(error)}), 500
-
-@app.route('/local-requests/all', methods=['GET'])
-def all_user_local_requests():
-    try:
-       
-        local_conn = sqlite3.connect('genuine_local.db')
-        local_cursor = local_conn.cursor()
-
-        all_requests_query = """
-            SELECT * FROM Request
-        """
-        local_cursor.execute(all_requests_query)
-        all_requests = local_cursor.fetchall()
-        user_requests = []
-        for row in all_requests:
-            request_info = {
-                "request_id": row[0],
-                "camera_id": row[1],
-                "camera_name": row[10],
-                "license_type": row[3],
-                "vechile_type": row[2],
-                "request_datetime": str(row[9]),
-                
-            }
-            user_requests.append(request_info)
-        
-        
-        local_conn.close()
-
-        return jsonify({"local_database": user_requests}), 200
-
-    except sqlite3.Error as error:  # Catch sqlite3 errors
-        return jsonify({"message": "Failed to fetch user requests", "error": str(error)}), 500
- #function to delete all records from local database   
-def delete_records():
-    try:
-        # SQLite setup
-        local_conn = sqlite3.connect('genuine_local.db', check_same_thread=False)
-        local_cursor = local_conn.cursor()
-
-        # Delete records
-        local_cursor.execute('DELETE FROM Request')
-        local_conn.commit()
+        data_to_save = request.json
+        print(data_to_save)
+        print("barboosh")
+        # SQLite connection and cursor
+        conn_local = create_sqlite_connection()
+        local_cursor = conn_local.cursor()
+
+        # Save data to SQLite (replace with your actual save logic)
+        query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, confidence_threshold, camera_id) VALUES (?, ?, ?, ?, ?)"
+        values = (
+            data_to_save['camera_name'],
+            data_to_save['camera_mode'],
+            data_to_save['camera_ip'],
+            data_to_save['confidence_threshold'],
+            data_to_save['camera_id']
+        )
+        local_cursor.execute(query, values)
+        conn_local.commit()
+
+        # Close the SQLite connection
+        conn_local.close()
+
+        return jsonify({'message': 'Data saved to SQLite successfully'})
 
     except Exception as e:
-        print(f"Error in delete_records: {str(e)}")
+        logging.exception('An error occurred while processing the request.')
+        return jsonify({'error': f'Failed to save data to SQLite: {str(e)}'}), 500
+    
 
-    finally:
-        # Close the database connection
-        local_conn.close()
 
-@app.route('/schedule_delete', methods=['POST'])
-def schedule_delete():
-    hours = request.json.get('hours', 24)  # Default to 24 hours if not provided
 
-    # Remove all existing jobs
-    scheduler.remove_all_jobs()
+@app.route('/update_in_sqlite', methods=['PUT'])
+def update_in_sqlite():
+    try:
+        # Assuming you receive data to be updated in the request
+        data_to_update = request.json
 
-    # Schedule the delete_records function to run every N hours
-    scheduler.add_job(delete_records, trigger=IntervalTrigger(hours=hours))
+        # SQLite connection and cursor
+        conn = create_sqlite_connection()
+        cursor = conn.cursor()
 
-    return jsonify({"message": f"Scheduled deletion of all records every {hours} hours."})  
+        # Update data in SQLite (replace with your actual update logic)
+        query = "UPDATE Camera SET camera_name = ?, camera_mode = ?, confidence_threshold = ?, camera_ip = ? WHERE camera_id = ?"
+        values = (
+            data_to_update['camera_name'],
+            data_to_update['camera_mode'],
+            data_to_update['confidence_threshold'],
+            data_to_update['camera_ip'],
+            data_to_update['camera_id']
+        )
+        cursor.execute(query, values)
+        conn.commit()
+
+        # Close the SQLite connection
+        conn.close()
+
+        if 'socketio' in globals():
+            for socket_id, cam_id in connected_cameras.items():
+                if cam_id == data_to_update['camera_id']:
+                    print('Disconnecting Socket ID:', socket_id)
+                    socketio.server.disconnect(socket_id)
+                    confidence = data_to_update['confidence_threshold']
+                    break
+
+        return jsonify({'message': 'Data updated in SQLite successfully'})
+
+    except Exception as e:
+        return jsonify({'error': f'Failed to update data in SQLite: {str(e)}'}), 500
+    
+@app.route('/delete_in_sqlite', methods=['DELETE'])
+def delete_in_pi():
+    try:
+
+        data_to_delete = request.json
+
+        print('Received DELETE request with data:', data_to_delete)
+
+        # SQLite connection and cursor
+        conn = create_sqlite_connection()
+        cursor = conn.cursor()
+
+
+        if 'socketio' in globals():
+            for socket_id, cam_id in connected_cameras.items():
+                if cam_id == data_to_delete['camera_id']:
+                    print('Disconnecting Socket ID:', socket_id)
+                    socketio.server.disconnect(socket_id)
+                    break
+
+        delete_query = "DELETE FROM Camera WHERE camera_id = ?"
+        values = (data_to_delete['camera_id'],)
+        cursor.execute(delete_query, values)
+
+ 
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({'message': 'Camera not found in the database'}), 404
+
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({'message': 'Data deleted in pi successfully'})
+
+    except Exception as e:
+        print('Error:', str(e))
+        return jsonify({'error': f'Failed to delete data in pi: {str(e)}'}), 500
+
+
+
+
+
+
+
+
+
+ 
 connected = False
 
 #this is for the socketio(Background thread)
 def background_thread():
+   
     global ret,confidence
     global connected
+  
     while connected:
         license_dict={}
         threshold=confidence
@@ -1168,6 +475,9 @@ def background_thread():
                             continue
         cap.release()
         cv2.destroyAllWindows()
+ 
+
+      
 
         
 def vehicle_query(license_dict):
@@ -1183,8 +493,10 @@ def vehicle_query(license_dict):
             confidence,
             orientation,
             photo_data,
-            request_datetime
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s)
+            request_datetime,
+            car_color,
+            car_bodytype 
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s,%s,%s)
         """
     sqlite_sql = """
         INSERT INTO Request (
@@ -1198,8 +510,10 @@ def vehicle_query(license_dict):
             confidence,
             orientation,
             photo_data,
-            request_datetime
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
+            request_datetime,
+            car_color,
+            car_bodytype 
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
         """
 
     cursor.execute(sql, (
@@ -1214,6 +528,8 @@ def vehicle_query(license_dict):
             license_dict['orientation'],
             license_dict['photo_data'],
             license_dict['request_datetime'],
+            license_dict['car_color'],
+            license_dict['car_bodytype'],
         ))
     local_cursor.execute(sqlite_sql, (
             license_dict['userid'],
@@ -1227,6 +543,8 @@ def vehicle_query(license_dict):
             license_dict['orientation'],
             license_dict['photo_data'],
             license_dict['request_datetime'],
+            license_dict['car_color'],
+            license_dict['car_bodytype'],
         ))
     local_conn.commit()
 
@@ -1241,6 +559,34 @@ def vehicle_query(license_dict):
 
     conn.commit()
 
+def delete_records():
+    try:
+        # SQLite setup
+        local_conn = sqlite3.connect('genuine_local.db', check_same_thread=False)
+        local_cursor = local_conn.cursor()
+
+        # Delete records
+        local_cursor.execute('DELETE FROM Request')
+        local_conn.commit()
+
+    except Exception as e:
+        print(f"Error in delete_records: {str(e)}")
+
+    finally:
+        # Close the database connection
+        local_conn.close()
+
+@app.route('/schedule_delete', methods=['POST'])
+def schedule_delete():
+    hours = request.json.get('hours', 24)  # Default to 24 hours if not provided
+
+    # Remove all existing jobs
+    scheduler.remove_all_jobs()
+
+    # Schedule the delete_records function to run every N hours
+    scheduler.add_job(delete_records, trigger=IntervalTrigger(hours=hours))
+
+    return jsonify({"message": f"Scheduled deletion of all records every {hours} hours."})  
 
 global camera_name, userid, camera_id
 connected_cameras = {}
@@ -1309,7 +655,10 @@ def handle_disconnect():
 
 
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
+
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
     scheduler.start()
     app.run(debug=True)
-    socketio.run(app, debug=True)
+    app.run(allow_unsafe_werkzeug=True)
