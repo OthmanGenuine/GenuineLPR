@@ -1,0 +1,11 @@
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+mysql-connector-python==8.2.0
+requests==2.31.0
+sqlite3==3.42.0
+python-jose==3.3.0
+ultralytics==8.0.226
+opencv-python==4.8.1.78
+numpy==1.26.2
+scheduler==0.8.5
+APScheduler==3.10.4

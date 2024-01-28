@@ -20,6 +20,9 @@ import sqlite3
 import scheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import requests
+
+
+# Create a Flask application instance
 app = Flask(__name__)
 
 scheduler = BackgroundScheduler(timezone="Asia/Riyadh")
@@ -262,7 +265,7 @@ def login_user():
 global camera_ip
 # this endpoint for the user camera add
 
-sqlite_camerasave_url = 'https://9978eaf1b70fe2.lhr.life/save_to_sqlite'
+sqlite_camerasave_url = 'https://bef979b1e6489c.lhr.life/save_to_sqlite'
 
 @app.route('/user/camera/add', methods=['POST'])
 def add_camera():
@@ -304,19 +307,19 @@ def add_camera():
         camera_id = cursor.lastrowid  # Update the global variable with the last inserted camera_id
 
         # Insert the same data into the other endpoint
-        """
+        
         request_json_with_id = request.json.copy()
         request_json_with_id["camera_id"] = camera_id
         response = requests.post(sqlite_camerasave_url, json=request_json_with_id)
         if response.status_code != 200:
             return jsonify({"message": "Failed to save data to the other endpoint"}), 500
-           """ 
+          
         return jsonify({"message": "Camera added successfully", "camera_id": camera_id})
     except mysql.connector.Error as error:
         conn.rollback()
         return jsonify({"message": "Failed to add camera", "error": str(error)}), 500
 #this endpoint for the user camera update
-sqlite_update_camera_url= 'https://5e99f95f21d407.lhr.life/update_in_sqlite'
+sqlite_update_camera_url= 'https://bef979b1e6489c.lhr.life/update_in_sqlite'
 @app.route('/user/camera/update', methods=['PUT'])  
 def update_camera():
     global connected_cameras, confidence
@@ -374,12 +377,12 @@ def update_camera():
         conn.commit()
 
         # Send update request to the other endpoint for SQLite update
-        """
+       
         response = requests.put(sqlite_update_camera_url, json=request.json)
 
         if response.status_code != 200:
             return jsonify({"message": "Failed to update data in SQLite"}), 500
-        """
+       
         # Additional logic for handling connected cameras, etc.
 
         return jsonify({"message": "Camera updated successfully"})
