@@ -18,6 +18,11 @@ import scheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from mysql.connector import Error
 import logging
+from gevent import pywsgi
+from geventwebsocket.handler import WebSocketHandler
+
+
+
 app = Flask(__name__)
 socketio = SocketIO(app)
 scheduler = BackgroundScheduler(timezone="Asia/Riyadh")
@@ -41,8 +46,8 @@ while not (mysql_success and sqlite_success):
             password='2459'
         )
         cursor = conn.cursor(cursor_class=CMySQLCursor, buffered=True)
-        cursor.execute("CREATE DATABASE IF NOT EXISTS local_genuine")
-        print("MySQL Database created successfully!")
+
+
         while True:
             try:
                 conn.ping(reconnect=True)
@@ -55,57 +60,10 @@ while not (mysql_success and sqlite_success):
                 print(f"Connection lost at {time_lost}")
                 # Wait for a while before trying to reconnect
                 time.sleep(5)
-        # MySQL queries for creating tables
-        queries = [
-            """
-            CREATE TABLE IF NOT EXISTS User (
-                userid INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(255),
-                email VARCHAR(255),
-                typeofplan VARCHAR(100),
-                password VARCHAR(255),
-                request_count INT DEFAULT 0
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS Request (
-                request_id INT AUTO_INCREMENT PRIMARY KEY,
-                userid INT,
-                vehicle_type VARCHAR(100),
-                license_type VARCHAR(100),
-                plate_arabic VARCHAR(100),
-                plate_english VARCHAR(100),
-                confidence FLOAT,
-                orientation VARCHAR(50),
-                photo_data MEDIUMBLOB,
-                request_datetime DATETIME,
-                camera_name VARCHAR(255),
-                car_color VARCHAR(50),
-                car_bodytype VARCHAR(50),
-                FOREIGN KEY (userid) REFERENCES User(userid),
-                FOREIGN KEY (camera_id) REFERENCES Camera(camera_id)
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS Camera (
-                camera_id INT AUTO_INCREMENT PRIMARY KEY,
-                camera_ip VARCHAR(255),
-                raspberrypi_id VARCHAR(255),
-                userid INT,
-                camera_name VARCHAR(255),
-                camera_mode VARCHAR(50), 
-                confidence_threshold FLOAT,
-                camera_port INTEGER,
-                FOREIGN KEY (userid) REFERENCES User(userid)
-            )
-            """,
-        ]
 
   
-        for query in queries:
-            cursor.execute(query)
 
-        print("MySQL Database connection and table creation successful!")
+
       
         mysql_success = True
 
@@ -196,15 +154,19 @@ def save_to_sqlite():
         local_cursor = conn_local.cursor()
 
         # Save data to SQLite
-        query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip,RaspareyPi_id ,confidence_threshold, camera_id) VALUES (?, ?, ?, ?, ?,?)"
+        query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, raspberrypi_id,confidence_threshold, camera_id) VALUES (?, ?, ?, ?, ?, ?)"
+  
         values = (
             data_to_save['camera_name'],
             data_to_save['camera_mode'],
             data_to_save['camera_ip'],
-            data_to_save['RaspareyPi_id'],
+            data_to_save['raspberrypi_id'],
             data_to_save['confidence_threshold'],
             data_to_save['camera_id']
         )
+
+  
+
         local_cursor.execute(query, values)
         conn_local.commit()
 
@@ -909,7 +871,20 @@ def handle_disconnect():
 
 if __name__ == "__main__":
 
-    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
+    
+
     scheduler.start()
-    app.run(debug=True)
-    app.run(allow_unsafe_werkzeug=True)
+    
+
+    socketio_server = pywsgi.WSGIServer(('127.0.0.1', 5000), app, handler_class=WebSocketHandler)
+    
+    try:
+
+        print('Running Flask-SocketIO server on http://127.0.0.1:5000')
+        socketio_server.serve_forever()
+    except KeyboardInterrupt:
+
+        print('Stopping server...')
+        socketio_server.stop()
+        scheduler.shutdown()
+        print('Server stopped.')

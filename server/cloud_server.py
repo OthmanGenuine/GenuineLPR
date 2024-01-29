@@ -56,7 +56,8 @@ while not (mysql_success):
                 email VARCHAR(255),
                 typeofplan VARCHAR(100),
                 password VARCHAR(255),
-                request_count INT DEFAULT 0
+                request_count INT DEFAULT 0,
+                FOREIGN KEY (typeofplan) REFERENCES plan_types(plan_name)
             )
             """,
             """
@@ -90,6 +91,12 @@ while not (mysql_success):
                 camera_port INTEGER,
                 FOREIGN KEY (userid) REFERENCES User(userid)
             )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS plan_types (
+                plan_name VARCHAR(100) PRIMARY KEY,
+                request_limit INT
+                )
             """,
         ]
 
