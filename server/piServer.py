@@ -20,11 +20,13 @@ from mysql.connector import Error
 import logging
 from gevent import pywsgi
 from geventwebsocket.handler import WebSocketHandler
-
-
+from flask_socketio import send
+from flask_cors import CORS
 
 app = Flask(__name__)
-socketio = SocketIO(app)
+socketio = SocketIO(app, async_mode='gevent')
+socketio.init_app(app, cors_allowed_origins="*")
+CORS(app)
 scheduler = BackgroundScheduler(timezone="Asia/Riyadh")
 
 
@@ -136,11 +138,24 @@ def decode_access_token(*, token: str):
         return decoded_jwt
     except jwt.PyJWTError:
         return {"message": "Could not decode token"}
+    except Exception as e:
+        return {"message": str(e)}
 
 
 
 def create_sqlite_connection():
     return sqlite3.connect(SQLITE_DATABASE_FILE)
+
+def check_mysql_connection(conn):
+    try:
+        conn.ping(reconnect=True)
+        print("Hello World! MySQL connection is active.")
+        return True
+    except mysql.connector.Error as e:
+        print(f"Error: {e}")
+        print("MySQL connection is not active due to error.")
+        return False
+
 
 
 @app.route('/save_to_sqlite', methods=['POST'])
@@ -179,13 +194,15 @@ def save_to_sqlite():
         logging.exception('An error occurred while processing the request.')
         return jsonify({'error': f'Failed to save data to SQLite: {str(e)}'}), 500
     
-
-
+sockets_to_disconnect = []
+should_call_offline_event = True
 
 @app.route('/update_in_sqlite', methods=['PUT'])
 def update_in_sqlite():
+    global disconnect_and_trigger_offline, should_call_offline_event
+
     try:
-        #  data to be updated in the request
+        # data to be updated in the request
         data_to_update = request.json
 
         # SQLite connection and cursor
@@ -206,24 +223,34 @@ def update_in_sqlite():
 
         # Close the SQLite connection
         conn.close()
-        #logic to disconnect camera if its conncted to a socket
+        
+        # Logic to emit update event to connected cameras
         if 'socketio' in globals():
+            # Create a list to store socket IDs to disconnect
+            global sockets_to_disconnect
             for socket_id, cam_id in connected_cameras.items():
                 if cam_id == data_to_update['camera_id']:
-                    print('Disconnecting Socket ID:', socket_id)
-                    socketio.server.disconnect(socket_id)
-                    confidence = data_to_update['confidence_threshold']
-                    break
+                    # Add socket ID to the list
+                    sockets_to_disconnect.append(socket_id)
 
+            # Disconnect the sockets outside the loop
+            for socket_id in sockets_to_disconnect:
+                # Set the flag to False to prevent triggering handle_offline_event()
+                should_call_offline_event = False
+                socketio.server.disconnect(socket_id)
+                should_call_offline_event = True
         return jsonify({'message': 'Data updated in SQLite successfully'})
 
     except Exception as e:
         return jsonify({'error': f'Failed to update data in SQLite: {str(e)}'}), 500
+
+
+
     
 @app.route('/delete_in_sqlite', methods=['DELETE'])
 def delete_in_pi():
     try:
-
+        global disconnect_and_trigger_offline, should_call_offline_event
         data_to_delete = request.json
 
         print('Received DELETE request with data:', data_to_delete)
@@ -234,11 +261,19 @@ def delete_in_pi():
 
         #logic to disconnect camera if its conncted to a socket
         if 'socketio' in globals():
+            # Create a list to store socket IDs to disconnect
+            global sockets_to_disconnect
             for socket_id, cam_id in connected_cameras.items():
                 if cam_id == data_to_delete['camera_id']:
-                    print('Disconnecting Socket ID:', socket_id)
-                    socketio.server.disconnect(socket_id)
-                    break
+                    # Add socket ID to the list
+                    sockets_to_disconnect.append(socket_id)
+
+            # Disconnect the sockets outside the loop
+            for socket_id in sockets_to_disconnect:
+                # Set the flag to False to prevent triggering handle_offline_event()
+                should_call_offline_event = False
+                socketio.server.disconnect(socket_id)
+                should_call_offline_event = True
 
         delete_query = "DELETE FROM Camera WHERE camera_id = ?"
         values = (data_to_delete['camera_id'],)
@@ -382,7 +417,10 @@ def background_thread():
                                 'photo_data': jpg_as_text,
                                 'userid' : userid,
                                 'camera_name': camera_name,
-                                'camera_id' : camera_id
+                                'camera_id' : camera_id,
+                                'car_color': "null",
+                                'car_make': "null",
+                                'car_bodytype': "null"
                             }
                             license_dictWS={
                                 'vehicle_type':     vehicle_id,
@@ -394,7 +432,10 @@ def background_thread():
                                 'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                 'userid' : userid,
                                 'camera_name': camera_name,
-                                'camera_id' : camera_id
+                                'camera_id' : camera_id,
+                                'car_color': "null",
+                                'car_make': "null",
+                                'car_bodytype': "null"
                             }
                             socketio.emit('license', license_dictWS)
                             vehicle_query(license_dict)
@@ -403,176 +444,49 @@ def background_thread():
                             continue
         cap.release()
         cv2.destroyAllWindows()
-        
-    while not connected:
-        license_dict={}
-        threshold=confidence
-        #LPR model init
-        lpr_model_path = "./models/lpr+orientation.pt"
-        model = YOLO(lpr_model_path)  
-
-        cap = cv2.VideoCapture(camera_ip)
-        while (cap.isOpened() and connected == False):
-            # Capture frame-by-frame
-            ret, img = cap.read()
-            if not ret:
-                break
-            #detecting vehicles and classing them
-            detected_vehicles=[]
-            vehicle_id=''
-            license_id=''
-            direction=""
-            detected_vehicles , vehicle_id =carAndPositionDetect(img,detected_vehicles)
-            #cropping vehicles for LPR
-            if detected_vehicles!=False:
-                for veh in detected_vehicles:
-                    x1 = int(veh[0])
-                    y1 = int(veh[1])
-                    x2 = int(veh[2])
-                    y2 = int(veh[3])
-                    cropped_vehicle = img[y1:y2, x1:x2]
-                    results = model([cropped_vehicle])
-                    for result in results:
-                        boxes = result.boxes
-                        names = result.names
-
-                        if boxes ==False:
-                            continue
-                        #convert tensors to numpy arrays
-                        boxes_np = boxes.xyxy.cpu().numpy()
-                        classs_np = result.boxes.cls.cpu().numpy()
-                        sorted_indices = np.argsort(boxes_np[:, 0])
-                        sorted_classs = classs_np[sorted_indices]
-                        #confidency
-                        conf=result.boxes.conf
-                        conf_np=conf.cpu().numpy()
-                        conf_sum=conf_np.sum()
-                        if conf_sum >0:
-                            conf_sum=conf_sum/len(conf_np)
-
-                        #vehicle_id crop
-                        lid=0
-                        sorted_boxes = boxes_np[boxes_np[:, 0].argsort()]
-                        for index,clss in enumerate(sorted_classs):
-                            if clss ==55:
-                                lid=index
-                            else:
-                                license_id="GCC"
-
-                        for num in sorted_classs:
-                            if num ==56 or num==58:
-                                direction="entering"
-                            elif num ==57 or num==59:
-                                direction="exiting"
-                        if lid!=0:
-                            #license id color detect
-                            vehicle_id_img_bbox=sorted_boxes[lid]
-                            x11 = int(vehicle_id_img_bbox[0])
-                            y11 = int(vehicle_id_img_bbox[1])
-                            x22 = int(vehicle_id_img_bbox[2])
-                            y22 = int(vehicle_id_img_bbox[3])
-                            vehicle_id_img= cropped_vehicle[y11:y22, x11:x22]
-                            license_id=colorDetect(vehicle_id_img)
-
-                        #sorting arabic and english license plate output 
-                        arabic_plate=[]
-                        english_plate=[]
-                        for cls in sorted_classs.tolist():
-                            if cls>=1 and cls<=27:
-                                english_plate.append(cls)
-                            elif cls>=28 and cls <=54:
-                                arabic_plate.append(cls)
-                        #final license format
-                        arabic_translated_plate = license_formatting_ar(arabic_plate,names,vehicle_id)
-                        english_processed_plate = license_formatting_en(english_plate,names)
-                        if arabic_translated_plate!=False and english_processed_plate==False:
-                            license_id = "old plate"
-                        #applying optional threshold 
-                        ret, buffer = cv2.imencode('.jpg', cropped_vehicle)
-                        jpg_as_text = base64.b64encode(buffer)
-                        if conf_sum>threshold:
-                            print(f'the vehicle type is {vehicle_id}')
-                            print(f'the license is of type {license_id}')
-                            print(f'the license in arabic is = {arabic_translated_plate}')
-                            print(f'the license in english is = {english_processed_plate}')
-                            print(f'confidency is = {conf_sum}')
-                            arabic_translated_plate = ', '.join(arabic_translated_plate)
-                            english_processed_plate = ', '.join(english_processed_plate)
-
-                            license_dict={
-                                'vehicle_type':     vehicle_id,
-                                'license_type':     license_id,
-                                'plate_in_arabic':  arabic_translated_plate,                                                                                                                                    
-                                'plate_in_english': english_processed_plate,
-                                'confidence':       conf_sum,
-                                'orientation' : direction,
-                                'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                'photo_data': jpg_as_text,
-                                'userid' : userid,
-                                'camera_name': camera_name,
-                                'camera_id' : camera_id
-                            }
-                            license_dictWS={
-                                'vehicle_type':     vehicle_id,
-                                'license_type':     license_id,
-                                'plate_in_arabic':  arabic_translated_plate,                                                                                                                                    
-                                'plate_in_english': english_processed_plate,
-                                'confidence':       conf_sum,
-                                'orientation' : direction,
-                                'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                'userid' : userid,
-                                'camera_name': camera_name,
-                                'camera_id' : camera_id
-                            }
-                            offline_mode(license_dict)
-                            socketio.emit('license', license_dictWS)
-                            time.sleep(7)
-                        else:
-                            continue
-        cap.release()
-        cv2.destroyAllWindows()
+    
  
 
 
 def vehicle_query(license_dict):
-    sql = """
-        INSERT INTO Request (
-            userid,
-            camera_id,
-            camera_name,
-            vehicle_type,
-            license_type,
-            plate_arabic,
-            plate_english,
-            confidence,
-            orientation,
-            photo_data,
-            request_datetime,
-            car_color,
-            car_bodytype
+    try:
+        # Your SQL queries go here...
+        sql = """
+            INSERT INTO Request (
+                userid,
+                camera_id,
+                camera_name,
+                vehicle_type,
+                license_type,
+                plate_arabic,
+                plate_english,
+                confidence,
+                orientation,
+                photo_data,
+                request_datetime,
+                car_color,
+                car_bodytype
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+        sqlite_sql = """
+            INSERT INTO Request (
+                user_id,
+                camera_id,
+                camera_name,
+                vehicle_type,
+                license_type,
+                plate_arabic,
+                plate_english,
+                confidence,
+                orientation,
+                photo_data,
+                request_datetime,
+                car_color,
+                car_bodytype
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
 
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s,%s,%s)
-        """
-    sqlite_sql = """
-        INSERT INTO Request (
-            user_id,
-            camera_id,
-            camera_name,
-            vehicle_type,
-            license_type,
-            plate_arabic,
-            plate_english,
-            confidence,
-            orientation,
-            photo_data,
-            request_datetime
-            car_color,
-            car_bodytype
-
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
-        """
-
-    cursor.execute(sql, (
+        cursor.execute(sql, (
             license_dict['userid'],
             license_dict['camera_id'],
             license_dict['camera_name'],
@@ -585,10 +499,9 @@ def vehicle_query(license_dict):
             license_dict['photo_data'],
             license_dict['request_datetime'],
             license_dict['car_color'],
-            license_dict['car_bodytype'],
-
+            license_dict['car_bodytype']
         ))
-    local_cursor.execute(sqlite_sql, (
+        local_cursor.execute(sqlite_sql, (
             license_dict['userid'],
             license_dict['camera_id'],
             license_dict['camera_name'],
@@ -601,21 +514,25 @@ def vehicle_query(license_dict):
             license_dict['photo_data'],
             license_dict['request_datetime'],
             license_dict['car_color'],
-            license_dict['car_bodytype'],
-
+            license_dict['car_bodytype']
         ))
-    local_conn.commit()
-
+        local_conn.commit()
 
         # Increment the request_count in the User table
-    sql_update = """
-        UPDATE User
-        SET request_count = request_count + 1
-        WHERE userid = %s
-        """
-    cursor.execute(sql_update, (userid,))
+        sql_update = """
+            UPDATE User
+            SET request_count = request_count + 1
+            WHERE userid = %s
+            """
+        cursor.execute(sql_update, (userid,))
+        conn.commit()
 
-    conn.commit()
+    except mysql.connector.Error as e:
+        # Handle connection error
+        print(f"MySQL Error: {e}")
+        # Call the function to handle offline event
+        handle_offline_event()
+
 def offline_mode(license_dict):
     create_temporary_table_sql = """
         CREATE TABLE IF NOT EXISTS request_temporary (
@@ -648,8 +565,8 @@ def offline_mode(license_dict):
             confidence,
             orientation,
             photo_data,
-            request_datetime
-            car_color
+            request_datetime,
+            car_color,
             car_bodytype
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?)
     """
@@ -739,8 +656,8 @@ def from_localtemp_Table_to_cloud():
                 confidence,
                 orientation,
                 photo_data,
-                request_datetime
-                car_color
+                request_datetime,
+                car_color,
                 car_bodytype
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,%s,%s)
         """
@@ -802,26 +719,30 @@ connected_cameras = {}
 #this is for the socketio connection
 @socketio.on('connect')
 def handle_connect():
-    global connected, userid, camera_id, camera_name, connected_cameras, camera_mode, confidence, camera_ip
+    global connected, userid, camera_id, camera_name, connected_cameras, camera_mode, confidence, camera_ip, transition_to_offline
 
     token = request.headers.get('X-My-Auth')
     camera_id = request.headers.get('X-Camera-Id')  # Get the camera id from the header
 
     if camera_id:
         connected_cameras[request.sid] = camera_id
+
     if token is not None and camera_id is not None:
         decoded_jwt = decode_access_token(token=token)
         if "message" in decoded_jwt:
-            return jsonify(decoded_jwt)
+            send(decoded_jwt["message"], json=True)  # Sending error message to client
+            return False  # Abort connection
+
         username = decoded_jwt["username"]
         query_check = "SELECT userid FROM User WHERE username = %s"
         cursor.execute(query_check, (username,))
         user = cursor.fetchone()
         cursor.fetchall()
-   
+
         if not user:
-            return jsonify({"message": "User does not exist"})
-        
+            send("User does not exist", json=True)  # Sending error message to client
+            return False  # Abort connection
+
         # Get the camera name
         query_camera_name = "SELECT camera_name FROM Camera WHERE camera_id = %s"
         cursor.execute(query_camera_name, (camera_id,))
@@ -829,8 +750,9 @@ def handle_connect():
         cursor.fetchall()
 
         if not camera:
-            return jsonify({"message": "Camera does not exist"})
-        
+            send("Camera does not exist", json=True)  # Sending error message to client
+            return False  # Abort connection
+
         camera_name = camera[0]  # Store the camera name
 
         # Query the local database for the camera_mode, confidence_threshold, and camera_ip
@@ -842,29 +764,200 @@ def handle_connect():
         print('Client connected, Camera ID:', camera_id, 'Camera Name:', camera_name)  # Print the camera id and name
         connected = True
         userid = user[0]  # Store the user id
+
+        # Reset transition flag and notify client to go online
+
+
         thread = threading.Thread(target=background_thread)
         thread.start()
+
     else:
         print('No token or camera id provided')
-
 @socketio.on('disconnect')
 def handle_disconnect():
+    global connected_cameras, connected, should_call_offline_event
+    
     try:
-        global connected, connected_cameras, camera_ip
-        print('Client disconnected')
-        connected = False
+        if connected:
+            print('Client disconnected')
+            connected = False
 
-        # Remove the disconnected client from connected_cameras
-        for socket_id, cam_id in list(connected_cameras.items()):  
-            if request.sid == socket_id:
-                del connected_cameras[socket_id]
-                print('Removed Socket ID:', socket_id, 'from connected cameras')
-                break
+            # Remove the disconnected client from connected_cameras
+            for socket_id, cam_id in list(connected_cameras.items()):  
+                if request.sid == socket_id:
+                    del connected_cameras[socket_id]
+                    print('Removed Socket ID:', socket_id, 'from connected cameras')
+
+            # Check if there are no more connected cameras
+            if not connected_cameras:
+                # Check if the flag is set to call handle_offline_event()
+                if should_call_offline_event:
+                    handle_offline_event()
+                else:
+                    print("Camera disconncted sucssfully not entring offline mode")
+
     except Exception as e:
         print('Error occurred during disconnection:', e)
-  
 
 
+
+
+
+
+def handle_offline_event():
+    try:
+        global connected
+
+ 
+
+        print('Entering offline mode...')
+    
+        connected_ping= False
+        while (check_mysql_connection(conn)==False):
+            # Optionally, perform any initialization for reconnected clients
+            license_dict={}
+            threshold=confidence
+            #LPR model init
+            lpr_model_path = "./models/lpr+orientation.pt"
+            model = YOLO(lpr_model_path)  
+
+            cap = cv2.VideoCapture(camera_ip)
+            while (cap.isOpened() and connected_ping==False):
+                if check_mysql_connection(conn)==True:
+                    connected_ping=True
+                    exit
+                # Capture frame-by-frame
+                ret, img = cap.read()
+                if not ret:
+                    exit
+                if not connected:
+                        
+                    #detecting vehicles and classing them
+                    detected_vehicles=[]
+                    vehicle_id=''
+                    license_id=''
+                    direction=""
+                    detected_vehicles , vehicle_id =carAndPositionDetect(img,detected_vehicles)
+                    #cropping vehicles for LPR
+                    if detected_vehicles!=False:
+                        for veh in detected_vehicles:
+                            x1 = int(veh[0])
+                            y1 = int(veh[1])
+                            x2 = int(veh[2])
+                            y2 = int(veh[3])
+                            cropped_vehicle = img[y1:y2, x1:x2]
+                            results = model([cropped_vehicle])
+                            for result in results:
+                                boxes = result.boxes
+                                names = result.names
+
+                                if boxes ==False:
+                                    continue
+                                #convert tensors to numpy arrays
+                                boxes_np = boxes.xyxy.cpu().numpy()
+                                classs_np = result.boxes.cls.cpu().numpy()
+                                sorted_indices = np.argsort(boxes_np[:, 0])
+                                sorted_classs = classs_np[sorted_indices]
+                                #confidency
+                                conf=result.boxes.conf
+                                conf_np=conf.cpu().numpy()
+                                conf_sum=conf_np.sum()
+                                if conf_sum >0:
+                                    conf_sum=conf_sum/len(conf_np)
+
+                                #vehicle_id crop
+                                lid=0
+                                sorted_boxes = boxes_np[boxes_np[:, 0].argsort()]
+                                for index,clss in enumerate(sorted_classs):
+                                    if clss ==55:
+                                        lid=index
+                                    else:
+                                        license_id="GCC"
+
+                                for num in sorted_classs:
+                                    if num ==56 or num==58:
+                                        direction="entering"
+                                    elif num ==57 or num==59:
+                                        direction="exiting"
+                                if lid!=0:
+                                    #license id color detect
+                                    vehicle_id_img_bbox=sorted_boxes[lid]
+                                    x11 = int(vehicle_id_img_bbox[0])
+                                    y11 = int(vehicle_id_img_bbox[1])
+                                    x22 = int(vehicle_id_img_bbox[2])
+                                    y22 = int(vehicle_id_img_bbox[3])
+                                    vehicle_id_img= cropped_vehicle[y11:y22, x11:x22]
+                                    license_id=colorDetect(vehicle_id_img)
+
+                                #sorting arabic and english license plate output 
+                                arabic_plate=[]
+                                english_plate=[]
+                                for cls in sorted_classs.tolist():
+                                    if cls>=1 and cls<=27:
+                                        english_plate.append(cls)
+                                    elif cls>=28 and cls <=54:
+                                        arabic_plate.append(cls)
+                                #final license format
+                                arabic_translated_plate = license_formatting_ar(arabic_plate,names,vehicle_id)
+                                english_processed_plate = license_formatting_en(english_plate,names)
+                                if arabic_translated_plate!=False and english_processed_plate==False:
+                                    license_id = "old plate"
+                                #applying optional threshold 
+                                ret, buffer = cv2.imencode('.jpg', cropped_vehicle)
+                                jpg_as_text = base64.b64encode(buffer)
+                                if conf_sum>threshold:
+                                    print(f'the vehicle type is {vehicle_id}')
+                                    print(f'the license is of type {license_id}')
+                                    print(f'the license in arabic is = {arabic_translated_plate}')
+                                    print(f'the license in english is = {english_processed_plate}')
+                                    print(f'confidency is = {conf_sum}')
+                                    arabic_translated_plate = ', '.join(arabic_translated_plate)
+                                    english_processed_plate = ', '.join(english_processed_plate)
+
+                                    license_dict={
+                                        'vehicle_type':     vehicle_id,
+                                        'license_type':     license_id,
+                                        'plate_in_arabic':  arabic_translated_plate,                                                                                                                                    
+                                        'plate_in_english': english_processed_plate,
+                                        'confidence':       conf_sum,
+                                        'orientation' : direction,
+                                        'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                        'photo_data': jpg_as_text,
+                                        'userid' : userid,
+                                        'camera_name': camera_name,
+                                        'camera_id' : camera_id,
+                                        'car_color': "null",
+                                        'car_make': "null",
+                                        'car_bodytype': "null"
+                                    }
+                                    license_dictWS={
+                                        'vehicle_type':     vehicle_id,
+                                        'license_type':     license_id,
+                                        'plate_in_arabic':  arabic_translated_plate,                                                                                                                                    
+                                        'plate_in_english': english_processed_plate,
+                                        'confidence':       conf_sum,
+                                        'orientation' : direction,
+                                        'request_datetime' : datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                        'userid' : userid,
+                                        'camera_name': camera_name,
+                                        'camera_id' : camera_id,
+                                        'car_color': "null",
+                                        'car_make': "null",
+                                        'car_bodytype': "null"
+                                    }
+                                    offline_mode(license_dict)
+                                    socketio.emit('license', license_dictWS)
+                                    time.sleep(7)
+                                else:
+                                    
+                                    continue
+                cap.release()
+                cv2.destroyAllWindows()
+    
+
+
+    except Exception as e:
+        print('Error occurred during offline mode:', e)
 
 
 

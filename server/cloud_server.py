@@ -246,6 +246,32 @@ def register_user():
     except mysql.connector.Error as error:
         conn.rollback()
         return jsonify({"message": "User registration failed", "error": str(error)})
+    
+    
+@app.route('/user/update_plan', methods=['PUT'])
+def update_plan():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    try:
+        new_plan = request.json.get('new_plan')
+
+        # Update the type of plan for the authenticated user
+        update_query = "UPDATE User SET typeofplan = %s WHERE username = %s"
+        cursor.execute(update_query, (new_plan, decoded_jwt['username']))
+        conn.commit()
+
+        return jsonify({"message": "Type of plan updated successfully"}), 200
+
+    except mysql.connector.Error as error:
+        conn.rollback()
+        return jsonify({"message": "Failed to update type of plan", "error": str(error)}), 500
 #this endpoint for the user login
 @app.route('/user/login', methods=['POST'])
 def login_user():
@@ -660,6 +686,55 @@ def requests_between_periods():
 
     except mysql.connector.Error as error:
         return jsonify({"message": "Failed to fetch requests between periods", "error": str(error)}), 500
+    
+
+@app.route('/user/requests_in_day_hour', methods=['POST'])
+def requests_in_day_hour():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    # Fetching the date and hour from the request body
+    data = request.json
+    date = data.get('date')
+    hour = data.get('hour')
+
+    try:
+        # Parse date and hour strings to datetime objects
+        date_dt = datetime.strptime(date, '%Y-%m-%d')
+        hour_dt = datetime.strptime(hour, '%I%p').strftime('%H')
+
+        # Fetch requests that occurred during the specified date and hour
+        requests_query = """
+            SELECT COUNT(*) FROM Request 
+            WHERE userid = %s 
+            AND DATE(request_datetime) = %s
+            AND HOUR(request_datetime) = %s
+        """
+        cursor.execute(requests_query, (userid, date_dt, hour_dt))
+        num_requests = cursor.fetchone()[0]
+
+        return jsonify({"number of vehicles entered": num_requests}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to fetch requests in the day and hour", "error": str(error)}), 500
+
+
 
 @app.route('/user/vehicle_type_percentage', methods=['GET'])
 def vehicle_type_percentage():
