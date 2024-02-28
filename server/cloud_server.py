@@ -20,7 +20,7 @@ import sqlite3
 import scheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import requests
-
+from datetime import datetime, timedelta
 
 # Create a Flask application instance
 app = Flask(__name__)
@@ -1338,6 +1338,143 @@ def bodytype_color_combinations():
 
     except Exception as e:
         return jsonify({"message": "Error retrieving data", "error": str(e)})
+    
+
+
+@app.route('/cars/count_today', methods=['POST'])
+def count_cars_today():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    try:
+        # Get today's date in the necessary format and set the time to 00:00:00 for the start of today
+        today_date = datetime.now().strftime('%Y-%m-%d')
+        start_of_today = datetime.strptime(today_date, '%Y-%m-%d')
+        end_of_today = start_of_today + timedelta(days=1)
+
+        # Query to count the number of car entries for the user for today
+        count_query = """
+            SELECT COUNT(*) FROM Request 
+            WHERE userid = %s 
+            AND request_datetime >= %s 
+            AND request_datetime < %s
+            AND vehicle_type = 'car' 
+        """
+        cursor.execute(count_query, (userid, start_of_today, end_of_today))
+        count_result = cursor.fetchone()
+
+        #it will count the number of rows
+        cars_entered_today = count_result[0]
+
+        return jsonify({"cars_entered_today": cars_entered_today}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to count cars entered today", "error": str(error)}), 500
+    
+@app.route('/cars/count_this_week', methods=['POST'])
+def count_cars_this_week():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check_user = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check_user, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    try:
+        # Calculate the start of the current week (Monday as the first day of the week)
+        today = datetime.now()
+        start_of_week = today - timedelta(days=today.weekday())  # Getting to Monday
+        start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)  # Resetting time to start of the day
+
+        # Query to count the number of car entries for the user for this week
+        count_query = """
+            SELECT COUNT(*) FROM Request 
+            WHERE userid = %s 
+            AND vehicle_type = 'car'  
+            AND request_datetime >= %s
+        """
+        cursor.execute(count_query, (userid, start_of_week))
+        count_result = cursor.fetchone()
+
+        
+        cars_entered_this_week = count_result[0]
+
+        return jsonify({"cars_entered_this_week": cars_entered_this_week}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to count cars entered this week", "error": str(error)}), 500
+    
+@app.route('/cars/count_this_month', methods=['POST'])
+def count_cars_this_month():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
+
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    username = decoded_jwt["username"]
+
+    query_check_user = "SELECT userid FROM User WHERE username = %s"
+    cursor.execute(query_check_user, (username,))
+    user = cursor.fetchone()
+    if not user:
+        return jsonify({"message": "User does not exist"}), 404
+    
+    userid = user[0]
+
+    try:
+        # Calculate the start of the current month
+        today = datetime.now()
+        start_of_month = datetime(today.year, today.month, 1)
+
+        # Query to count the number of car entries for the user for this month
+        count_query = """
+            SELECT COUNT(*) FROM Request 
+            WHERE userid = %s 
+            AND vehicle_type = 'car'  
+            AND request_datetime >= %s
+        """
+        cursor.execute(count_query, (userid, start_of_month))
+        count_result = cursor.fetchone()
+
+        
+        cars_entered_this_month = count_result[0]
+
+        return jsonify({"cars_entered_this_month": cars_entered_this_month}), 200
+
+    except mysql.connector.Error as error:
+        return jsonify({"message": "Failed to count cars entered this month", "error": str(error)}), 500
 if __name__ == '__main__':
     scheduler.start()
     app.run(debug=True)

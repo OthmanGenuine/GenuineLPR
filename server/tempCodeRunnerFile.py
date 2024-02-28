@@ -1,0 +1,1 @@
+/cars/count_today
