@@ -104,6 +104,7 @@ while not (mysql_success and sqlite_success):
                 car_bodytype VARCHAR(50)
             )
         ''')
+
         # Commit changes and close the connection
         local_conn.commit()
         
@@ -124,6 +125,7 @@ while not (mysql_success and sqlite_success):
 
 # Both databases connected successfully, break out of the loop
 print("Both MySQL and SQLite databases connected successfully!")
+
 
 
 

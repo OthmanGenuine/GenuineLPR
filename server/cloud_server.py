@@ -2,11 +2,11 @@ from flask import Flask, request, jsonify, abort
 import mysql
 import time
 from mysql.connector.cursor_cext import CMySQLCursor
-from pydantic import BaseModel, ValidationError,EmailStr, Field,confloat
+from pydantic import BaseModel, ValidationError,EmailStr, Field,confloat, validator,field_validator
 from passlib.hash import pbkdf2_sha256
 from datetime import datetime
 from jose import JWTError, jwt
-from typing import Optional
+from typing import Optional, Union
 import json
 from flask_socketio import SocketIO, emit,disconnect
 import threading
@@ -21,10 +21,12 @@ import scheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import requests
 from datetime import datetime, timedelta
+from flask_cors import CORS
+from gevent.pywsgi import WSGIServer
 
 # Create a Flask application instance
 app = Flask(__name__)
-
+CORS(app)
 scheduler = BackgroundScheduler(timezone="Asia/Riyadh")
 
 
@@ -149,15 +151,22 @@ class User(BaseModel):
         max_length=50,
         description="Password should have 6-50 characters",
     )
+ConfFloat = confloat(strict=True, lt=1.0) if confloat else float
+
 class CameraData(BaseModel):
     camera_id: Optional[str] = None
     camera_name: str
     camera_mode: str
     camera_ip: str
-    RaspareyPi_id :str
-    camera_port :int
-    confidence_threshold: confloat(strict=True, lt=1.0)
+    RaspareyPi_id: str
+    camera_port: int
+    confidence_threshold: float
 
+    @field_validator('confidence_threshold')
+    def validate_confidence_threshold(cls, value):
+        if value is not None and not isinstance(value, (float, confloat)):
+            raise ValueError('Confidence threshold must be a float value')
+        return value
 class CameraIdBaseModel(BaseModel):
     camera_id: str
 
@@ -248,30 +257,7 @@ def register_user():
         return jsonify({"message": "User registration failed", "error": str(error)})
     
     
-@app.route('/user/update_plan', methods=['PUT'])
-def update_plan():
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return jsonify({"message": "Authorization header is missing"}), 401
 
-    token = auth_header.split(" ")[1]
-    decoded_jwt = decode_access_token(token=token)
-    if "message" in decoded_jwt:
-        return jsonify(decoded_jwt), 401
-
-    try:
-        new_plan = request.json.get('new_plan')
-
-        # Update the type of plan for the authenticated user
-        update_query = "UPDATE User SET typeofplan = %s WHERE username = %s"
-        cursor.execute(update_query, (new_plan, decoded_jwt['username']))
-        conn.commit()
-
-        return jsonify({"message": "Type of plan updated successfully"}), 200
-
-    except mysql.connector.Error as error:
-        conn.rollback()
-        return jsonify({"message": "Failed to update type of plan", "error": str(error)}), 500
 #this endpoint for the user login
 @app.route('/user/login', methods=['POST'])
 def login_user():
@@ -341,11 +327,11 @@ def add_camera():
 
         # Insert the same data into the other endpoint
         
-        request_json_with_id = request.json.copy()
-        request_json_with_id["camera_id"] = camera_id
-        response = requests.post(sqlite_camerasave_url, json=request_json_with_id)
-        if response.status_code != 200:
-            return jsonify({"message": "Failed to save data to the other endpoint"}), 500
+        #request_json_with_id = request.json.copy()
+        #request_json_with_id["camera_id"] = camera_id
+        #response = requests.post(sqlite_camerasave_url, json=request_json_with_id)
+        #if response.status_code != 200:
+           # return jsonify({"message": "Failed to save data to the other endpoint"}), 500
           
         return jsonify({"message": "Camera added successfully", "camera_id": camera_id})
     except mysql.connector.Error as error:
@@ -505,7 +491,31 @@ def delete_camera():
         conn.rollback()
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         return jsonify({"message": "Failed to delete camera", "error": str(error)}), 500
+    
+@app.route('/user/update_plan', methods=['PUT'])
+def update_plan():
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return jsonify({"message": "Authorization header is missing"}), 401
 
+    token = auth_header.split(" ")[1]
+    decoded_jwt = decode_access_token(token=token)
+    if "message" in decoded_jwt:
+        return jsonify(decoded_jwt), 401
+
+    try:
+        new_plan = request.json.get('new_plan')
+
+        # Update the type of plan for the authenticated user
+        update_query = "UPDATE User SET typeofplan = %s WHERE username = %s"
+        cursor.execute(update_query, (new_plan, decoded_jwt['username']))
+        conn.commit()
+
+        return jsonify({"message": "Type of plan updated successfully"}), 200
+
+    except mysql.connector.Error as error:
+        conn.rollback()
+        return jsonify({"message": "Failed to update type of plan", "error": str(error)}), 500
 @app.route('/user/cameras/get', methods=['GET'])
 def get_cameras():
     auth_header = request.headers.get('Authorization')
@@ -1475,7 +1485,12 @@ def count_cars_this_month():
 
     except mysql.connector.Error as error:
         return jsonify({"message": "Failed to count cars entered this month", "error": str(error)}), 500
-if __name__ == '__main__':
-    scheduler.start()
-    app.run(debug=True)
-
+if __name__ == "__main__":
+    try:
+        print("Server is running...")
+        scheduler.start()
+        cloud_server = WSGIServer(('0.0.0.0', 5000), app)
+        cloud_server.serve_forever()
+    except Exception as e:
+        print("An error occurred:", str(e))
+        

@@ -1,1 +1,1 @@
-/cars/count_today
+/save_to_sqlite
