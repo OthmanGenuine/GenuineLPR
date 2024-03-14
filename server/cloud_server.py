@@ -58,14 +58,15 @@ while not (mysql_success):
                 email VARCHAR(255),
                 typeofplan VARCHAR(100),
                 password VARCHAR(255),
-                request_count INT DEFAULT 0,
-                FOREIGN KEY (typeofplan) REFERENCES plan_types(plan_name)
+                request_count INT DEFAULT 0
+
             )
             """,
             """
             CREATE TABLE IF NOT EXISTS Request (
                 request_id INT AUTO_INCREMENT PRIMARY KEY,
                 userid INT,
+                camera_id INT,
                 vehicle_type VARCHAR(100),
                 license_type VARCHAR(100),
                 plate_arabic VARCHAR(100),
@@ -76,9 +77,8 @@ while not (mysql_success):
                 request_datetime DATETIME,
                 camera_name VARCHAR(255),
                 car_color VARCHAR(50),
-                car_bodytype VARCHAR(50),
-                FOREIGN KEY (userid) REFERENCES User(userid),
-                FOREIGN KEY (camera_id) REFERENCES Camera(camera_id)
+                car_bodytype VARCHAR(50)
+
             )
             """,
             """
@@ -90,8 +90,8 @@ while not (mysql_success):
                 camera_name VARCHAR(255),
                 camera_mode VARCHAR(50), 
                 confidence_threshold FLOAT,
-                camera_port INTEGER,
-                FOREIGN KEY (userid) REFERENCES User(userid)
+                camera_port INTEGER
+
             )
             """,
             """
@@ -100,11 +100,23 @@ while not (mysql_success):
                 request_limit INT
                 )
             """,
-        ]
+           
 
-  
-        for query in queries:
-            cursor.execute(query)
+        ]
+        alter_table_queries = [
+            "ALTER TABLE Request ADD CONSTRAINT fk_request_userid FOREIGN KEY (userid) REFERENCES User(userid);",
+            "ALTER TABLE Request ADD CONSTRAINT fk_request_cameraid FOREIGN KEY (camera_id) REFERENCES Camera(camera_id);",
+            "ALTER TABLE Camera ADD CONSTRAINT fk_camera_userid FOREIGN KEY (userid) REFERENCES User(userid);"
+        ]
+    
+        try:
+            for query in queries:
+                cursor.execute(query)
+                conn.commit()
+        except mysql.connector.Error as err:
+            print(f"Failed creating table: {err}")
+
+
 
         print("MySQL Database connection and table creation successful!")
       
@@ -240,7 +252,7 @@ def register_user():
     query_check = "SELECT username FROM User WHERE username = %s"
     cursor.execute(query_check, (user_data.username,))
     existing_user = cursor.fetchone()
-    cursor.fetchall()
+    
     if existing_user:
         return jsonify({"message": "Username already exists"})
 

@@ -75,16 +75,26 @@ while not (mysql_success and sqlite_success):
     
 
 
+
+#ALTER TABLE Camera
+#ADD COLUMN camera_port VARCHAR(255);
+
+
+
+
+      
         local_cursor.execute('''
             CREATE TABLE IF NOT EXISTS Camera (
                 camera_id INTEGER,
                 camera_ip VARCHAR(255),
+                camera_port VARCHAR(255), 
                 raspberrypi_id VARCHAR(255),
                 userid INTEGER,
                 camera_name VARCHAR(255),
                 camera_mode VARCHAR(50),
                 confidence_threshold FLOAT
-            )
+            );
+
         ''')
         local_cursor.execute('''
                     CREATE TABLE IF NOT EXISTS Request(
@@ -130,6 +140,7 @@ print("Both MySQL and SQLite databases connected successfully!")
 
 
 global camera_ip
+global camera_port
 SQLITE_DATABASE_FILE = 'genuine_local.db'
 
 SECRET_KEY = "245"
@@ -163,31 +174,34 @@ def check_mysql_connection(conn):
 @app.route('/save_to_sqlite', methods=['POST'])
 def save_to_sqlite():
     try:
-   
         data_to_save = request.json
 
-        # SQLite connection and cursor
+    
         conn_local = create_sqlite_connection()
         local_cursor = conn_local.cursor()
 
-        # Save data to SQLite
-        query = "INSERT INTO Camera (camera_name, camera_mode, camera_ip, raspberrypi_id,confidence_threshold, camera_id) VALUES (?, ?, ?, ?, ?, ?)"
-  
+      
+        query = """
+        INSERT INTO Camera (camera_name, camera_mode, camera_ip, raspberrypi_id, confidence_threshold, camera_id, camera_port, userid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+     
         values = (
             data_to_save['camera_name'],
             data_to_save['camera_mode'],
             data_to_save['camera_ip'],
             data_to_save['raspberrypi_id'],
             data_to_save['confidence_threshold'],
-            data_to_save['camera_id']
+            data_to_save['camera_id'],
+            data_to_save['camera_port'],
+            data_to_save['userid']  
         )
-
-  
 
         local_cursor.execute(query, values)
         conn_local.commit()
 
-        # Close the SQLite connection
+ 
         conn_local.close()
 
         return jsonify({'message': 'Data saved to SQLite successfully'})
@@ -195,6 +209,7 @@ def save_to_sqlite():
     except Exception as e:
         logging.exception('An error occurred while processing the request.')
         return jsonify({'error': f'Failed to save data to SQLite: {str(e)}'}), 500
+
     
 sockets_to_disconnect = []
 should_call_offline_event = True
@@ -320,7 +335,7 @@ def background_thread():
         lpr_model_path = "./models/lpr+orientation.pt"
         model = YOLO(lpr_model_path)  
         from_localtemp_Table_to_cloud()
-        cap = cv2.VideoCapture(camera_ip)
+        cap = cv2.VideoCapture(f'{camera_ip}:{camera_port}')
         while (cap.isOpened() and connected == True):
             # Capture frame-by-frame
             ret, img = cap.read()
@@ -758,12 +773,12 @@ def handle_connect():
         camera_name = camera[0]  # Store the camera name
 
         # Query the local database for the camera_mode, confidence_threshold, and camera_ip
-        local_cursor.execute("SELECT camera_mode, confidence_threshold, camera_ip FROM Camera WHERE camera_id = ?", (camera_id,))
+        local_cursor.execute("SELECT camera_mode, confidence_threshold, camera_ip, camera_port FROM Camera WHERE camera_id = ?", (camera_id,))
         result = local_cursor.fetchone()
         if result is not None:
-            camera_mode, confidence, camera_ip = result
+            camera_mode, confidence, camera_ip, camera_port = result
 
-        print('Client connected, Camera ID:', camera_id, 'Camera Name:', camera_name)  # Print the camera id and name
+        print('Client connected, Camera ID:', camera_id, 'Camera Name:', camera_name,  'camera_port', camera_port, 'camera_ip' , camera_ip )  # Print the camera id and name
         connected = True
         userid = user[0]  # Store the user id
 
